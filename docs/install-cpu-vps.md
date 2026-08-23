@@ -39,7 +39,8 @@ sudo apt install -y build-essential curl git
 curl -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env
 # Go 1.24 and Node 22 as in install.sh
 git clone https://github.com/xindex2/llmfast-cpu /opt/forge && cd /opt/forge
-(cd engine && cargo build --release) && (cd gateway && go build -o forge-gateway .) && (cd admin && npm ci && npm run build)
+(cd engine && cargo build --release && cp target/release/forge-engine forge-engine)
+(cd gateway && go build -o forge-gateway .) && (cd admin && npm ci && npm run build)
 cp deploy/gateway.env.example gateway.env   # edit ADMIN_TOKEN, paths
 ./start.sh                                  # or the systemd unit in deploy/
 ```

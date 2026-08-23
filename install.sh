@@ -30,6 +30,7 @@ cd "$DEST"
 
 echo "== build engine (this is the slow part, ~2-5 min)"
 (cd engine && cargo build --release 2>&1 | tail -1)
+cp engine/target/release/forge-engine engine/forge-engine
 echo "== build gateway"
 (cd gateway && go build -o forge-gateway .)
 echo "== build admin"
