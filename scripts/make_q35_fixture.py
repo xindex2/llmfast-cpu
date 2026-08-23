@@ -3,13 +3,18 @@
 import json, struct, numpy as np
 
 rng = np.random.default_rng(7)
-H, I, L, NH, NKV, HD, V = 32, 48, 4, 4, 2, 16, 50
-ROT = 4              # partial_rotary_factor 0.25 * 16
-NK, NV, DK, DV, CK = 2, 4, 8, 8, 4
+import sys
+VARIANT = sys.argv[1] if len(sys.argv) > 1 else "a"
+if VARIANT == "a":
+    H, I, L, NH, NKV, HD, V = 32, 64, 4, 4, 2, 16, 50
+else:  # real-model ratios: 3 v-heads per k-head, gqa 3:1, bigger dims
+    H, I, L, NH, NKV, HD, V = 64, 96, 8, 6, 2, 32, 64
+ROT = HD // 4        # partial_rotary_factor 0.25
+NK, NV, DK, DV, CK = (2, 4, 8, 8, 4) if VARIANT == "a" else (2, 6, 16, 16, 4)
 KEY, VAL = NK*DK, NV*DV
 CD = 2*KEY + VAL
 THETA = 1e7
-layer_types = ["linear_attention","linear_attention","linear_attention","full_attention"]
+layer_types = (["linear_attention"]*3 + ["full_attention"]) * (L // 4)
 
 def w(*shape, s=0.3):
     return (rng.standard_normal(shape) * s).astype(np.float32)
@@ -55,7 +60,7 @@ for k in T:
     T[k] = bf16_back(np.ascontiguousarray(T[k]))
 
 import os
-outdir = "/Users/pro/Desktop/llmfffff2/models/tiny-q35"
+outdir = "/Users/pro/Desktop/llmfffff2/models/tiny-q35" + ("" if VARIANT == "a" else "-b")
 os.makedirs(outdir, exist_ok=True)
 # write safetensors
 header = {}
@@ -87,7 +92,7 @@ def rms(x, wgt, eps=1e-6):
 def silu(x): return x / (1 + np.exp(-x))
 def softplus(x): return np.log1p(np.exp(x))
 
-tokens = [3, 17, 42, 7, 5, 23, 11, 9]
+tokens = [3, 17, 42, 7, 5, 23, 11, 9, 31, 2, 44, 19]
 S = len(tokens)
 x = T[pre+"embed_tokens.weight"][tokens].astype(np.float32)   # S,H
 

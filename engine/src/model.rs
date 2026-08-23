@@ -311,9 +311,14 @@ impl Model {
                     gate: config.attn_gate,
                 }
             } else {
+                // The delta-rule recurrence compounds quantization noise across tokens, so the
+                // linear-attention projections stay at least q8 even when the rest runs q4.
+                let lq_env = std::env::var("LIN_QUANT").ok();
+                let lq: &str = lq_env.as_deref().unwrap_or(if quant == "q4" { "q8" } else { quant.as_str() });
+                let _ = &lq_env;
                 Attn::Lin {
-                    w_qkv: Weight::load(&st, &format!("{p}linear_attn.in_proj_qkv.weight"), &quant),
-                    w_z: Weight::load(&st, &format!("{p}linear_attn.in_proj_z.weight"), &quant),
+                    w_qkv: Weight::load(&st, &format!("{p}linear_attn.in_proj_qkv.weight"), lq),
+                    w_z: Weight::load(&st, &format!("{p}linear_attn.in_proj_z.weight"), lq),
                     // beta/decay projections are tiny and numerically sensitive: keep full precision
                     w_b: Weight::load(&st, &format!("{p}linear_attn.in_proj_b.weight"), "bf16"),
                     w_a: Weight::load(&st, &format!("{p}linear_attn.in_proj_a.weight"), "bf16"),
@@ -321,7 +326,7 @@ impl Model {
                     dt_bias: st.f32(&format!("{p}linear_attn.dt_bias")),
                     a_log: st.f32(&format!("{p}linear_attn.A_log")),
                     norm_w: st.f32(&format!("{p}linear_attn.norm.weight")),
-                    w_out: Weight::load(&st, &format!("{p}linear_attn.out_proj.weight"), &quant),
+                    w_out: Weight::load(&st, &format!("{p}linear_attn.out_proj.weight"), lq),
                 }
             };
             layers.push(Layer {
@@ -355,7 +360,8 @@ impl Model {
             norm: st.f32(&format!("{}norm.weight", config.prefix)),
             lm_head: {
                 let name = if st.has("lm_head.weight") { "lm_head.weight".to_string() } else { format!("{}embed_tokens.weight", config.prefix) };
-                Weight::load(&st, &name, &quant)
+                let hq = if quant == "q4" && config.lin.is_some() { "q8" } else { quant.as_str() };
+                Weight::load(&st, &name, hq)
             },
             layers,
             config,

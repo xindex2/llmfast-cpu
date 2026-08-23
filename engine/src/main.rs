@@ -284,7 +284,8 @@ fn run_fixture(fdir: &str) {
     let fx: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("{fdir}/fixture.json")).unwrap()).unwrap();
     let toks: Vec<u32> = fx["tokens"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
     let expect: Vec<f32> = fx["logits_last"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-    let model = model::Model::load_with(fdir, "bf16");
+    let quant = std::env::var("QUANT").unwrap_or_else(|_| "bf16".into());
+    let model = model::Model::load_with(fdir, &quant);
     let mut cache = model::KvCache::new(&model.config);
     let got = model.forward_batch(&toks, &mut cache);
     let maxerr = got.iter().zip(&expect).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
@@ -296,7 +297,8 @@ fn run_fixture(fdir: &str) {
     let maxerr2 = got.iter().zip(&got2).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     println!("fixture: batched-vs-reference max abs err {maxerr:.6} | sequential-vs-batched {maxerr2:.6}");
     let scale = expect.iter().map(|v| v.abs()).fold(0f32, f32::max).max(1.0);
-    assert!(maxerr / scale < 2e-2, "reference mismatch");
+    let tol: f32 = std::env::var("FIXTURE_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(2e-2);
+    assert!(maxerr / scale < tol, "reference mismatch");
     assert!(maxerr2 / scale < 2e-2, "sequential/batched mismatch");
     println!("PASS");
 }
