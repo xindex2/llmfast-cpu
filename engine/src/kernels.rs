@@ -110,6 +110,18 @@ fn dequant_bf16(w: &[u16], out: &mut [f32]) {
     }
 }
 
+/// Public Send+Sync raw pointer wrapper for pool closures outside this module.
+#[derive(Clone, Copy)]
+pub struct SendPtrPub(pub *mut f32);
+unsafe impl Send for SendPtrPub {}
+unsafe impl Sync for SendPtrPub {}
+impl SendPtrPub {
+    #[inline]
+    pub fn get(&self) -> *mut f32 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SendPtr(*mut f32);
 unsafe impl Send for SendPtr {}

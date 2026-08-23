@@ -25,8 +25,12 @@ fn main() {
     let name = std::env::var("MODEL_NAME").unwrap_or_else(|_| std::path::Path::new(&dir).file_name().unwrap().to_string_lossy().into_owned());
     let think = std::env::var("THINK").map_or(false, |v| v == "1");
 
-    let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--fixture") {
+        run_fixture(&args[i + 1]);
+        return;
+    }
+    let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
     if let Some(i) = args.iter().position(|a| a == "--tokenize") {
         let ids = tokenizer.encode(&args[i + 1].replace("\\n", "\n"));
         println!("{ids:?}");
@@ -97,7 +101,7 @@ fn main() {
     if want == "auto" && !fits {
         eprintln!("device: auto → cpu (model {:.2} GB vs GPU_MEM_MB={gpu_mem_mb}; set DEVICE=gpu to force)", model.weight_bytes() as f64 / 1e9);
     }
-    let net = if (want == "gpu" || (want == "auto" && fits)) && model.layers_mlp_dense() {
+    let net = if (want == "gpu" || (want == "auto" && fits)) && model.gpu_supported() {
         // Any failure inside the GPU stack (driver quirks, limits) must not take the engine down.
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             gpu::Gpu::init().map(|g| {
@@ -272,4 +276,27 @@ fn bench() {
     }
     let dt = t.elapsed().as_secs_f64() / 100.0;
     eprintln!("attention pos={pos}: {:.3} ms/token/layer  (x28 layers = {:.1} ms/token)", dt * 1e3, dt * 28e3);
+}
+
+/// Compare our forward pass against reference logits produced by the NumPy transcription of the
+/// Hugging Face modeling code (scripts in the repo history). Validates new architectures.
+fn run_fixture(fdir: &str) {
+    let fx: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("{fdir}/fixture.json")).unwrap()).unwrap();
+    let toks: Vec<u32> = fx["tokens"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+    let expect: Vec<f32> = fx["logits_last"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+    let model = model::Model::load_with(fdir, "bf16");
+    let mut cache = model::KvCache::new(&model.config);
+    let got = model.forward_batch(&toks, &mut cache);
+    let maxerr = got.iter().zip(&expect).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    let mut c2 = model::KvCache::new(&model.config);
+    let mut got2 = Vec::new();
+    for &t in &toks {
+        got2 = model.forward_batch(&[t], &mut c2);
+    }
+    let maxerr2 = got.iter().zip(&got2).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    println!("fixture: batched-vs-reference max abs err {maxerr:.6} | sequential-vs-batched {maxerr2:.6}");
+    let scale = expect.iter().map(|v| v.abs()).fold(0f32, f32::max).max(1.0);
+    assert!(maxerr / scale < 2e-2, "reference mismatch");
+    assert!(maxerr2 / scale < 2e-2, "sequential/batched mismatch");
+    println!("PASS");
 }

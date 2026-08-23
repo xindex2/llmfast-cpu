@@ -202,16 +202,20 @@ impl GpuModel {
                 Mlp::Dense(e) => (q8(&e.w_gate), q8(&e.w_up), q8(&e.w_down)),
                 Mlp::Moe { .. } => panic!("GPU backend: MoE not implemented yet"),
             };
-            let qkv_m = concat_q8(&[q8(&l.wq), q8(&l.wk), q8(&l.wv)]);
+            let (lwq, lwk, lwv, lwo, lqn, lkn) = match &l.attn {
+                crate::model::Attn::Full { wq, wk, wv, wo, q_norm, k_norm, gate: false } => (wq, wk, wv, wo, q_norm, k_norm),
+                _ => panic!("GPU backend v1 supports plain softmax attention only (use DEVICE=cpu)"),
+            };
+            let qkv_m = concat_q8(&[q8(lwq), q8(lwk), q8(lwv)]);
             let gu_m = concat_q8(&[wg, wu]);
             let wqkv = gpu.upload_q8(&qkv_m.q, &qkv_m.scales, qkv_m.n, qkv_m.k);
-            let wo = gpu.upload_q8(&q8(&l.wo).q, &q8(&l.wo).scales, q8(&l.wo).n, q8(&l.wo).k);
+            let wo = gpu.upload_q8(&q8(lwo).q, &q8(lwo).scales, q8(lwo).n, q8(lwo).k);
             let wgu = gpu.upload_q8(&gu_m.q, &gu_m.scales, gu_m.n, gu_m.k);
             let wdown = gpu.upload_q8(&wd.q, &wd.scales, wd.n, wd.k);
             let ln1 = f32buf(&l.ln1, "ln1");
             let ln2 = f32buf(&l.ln2, "ln2");
-            let q_norm = f32buf(&l.q_norm, "q_norm");
-            let k_norm = f32buf(&l.k_norm, "k_norm");
+            let q_norm = f32buf(lqn, "q_norm");
+            let k_norm = f32buf(lkn, "k_norm");
             let mp = |w: &GQ8| dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("mp"), contents: as_bytes(&[w.n as u32, w.k as u32, 0u32, 0u32]), usage: wgpu::BufferUsages::UNIFORM });
             let (mp_qkv, mp_o, mp_gu, mp_down) = (mp(&wqkv), mp(&wo), mp(&wgu), mp(&wdown));
             layers.push(GLayer {

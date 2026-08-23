@@ -47,6 +47,9 @@ cp deploy/gateway.env.example gateway.env   # edit ADMIN_TOKEN, paths
 
 ## 3. Add a model from the admin
 
+Supported architectures: Qwen3 (dense + MoE, e.g. Qwen3-0.6B…32B, Qwen3-30B-A3B) and Qwen3.5 hybrid
+(e.g. Qwen3.8-27B — use quant q4 and context ≤32768 on a 32 GB box; dense-weight speed applies).
+
 Open `http://<droplet-ip>:8080/admin/ui` → **Settings**: base URL `http://<droplet-ip>:8080`, paste
 the admin token → **Models** → paste `Qwen/Qwen3-0.6B` (or `Qwen/Qwen3-30B-A3B`), choose
 quant `q4` for big models on CPU, set prices → **add & download** → **start engine**.

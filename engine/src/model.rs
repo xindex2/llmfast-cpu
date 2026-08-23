@@ -62,6 +62,22 @@ impl Weight {
     }
 }
 
+/// Gated-DeltaNet linear attention dimensions (Qwen3.5 hybrid layers).
+#[derive(Debug, Clone)]
+pub struct LinCfg {
+    pub nk: usize,     // key heads
+    pub nv: usize,     // value heads (nk divides nv)
+    pub dk: usize,     // key head dim
+    pub dv: usize,     // value head dim
+    pub conv_k: usize, // causal conv kernel
+}
+
+impl LinCfg {
+    pub fn key_dim(&self) -> usize { self.nk * self.dk }
+    pub fn value_dim(&self) -> usize { self.nv * self.dv }
+    pub fn conv_dim(&self) -> usize { 2 * self.key_dim() + self.value_dim() }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub hidden: usize,
@@ -79,22 +95,55 @@ pub struct Config {
     pub experts_per_tok: usize,
     pub moe_intermediate: usize,
     pub norm_topk_prob: bool,
+    // Qwen3.5 hybrid extras (defaults reproduce Qwen3 behavior)
+    pub rotary_dim: usize,        // dims of each head that get RoPE (partial rotary)
+    pub attn_gate: bool,          // q_proj also produces a sigmoid output gate per head
+    pub layer_types: Vec<bool>,   // per layer: true = full attention; empty = all full
+    pub lin: Option<LinCfg>,
+    pub prefix: String,           // tensor name prefix: "model." or "model.language_model."
+}
+
+impl Config {
+    pub fn is_full(&self, layer: usize) -> bool {
+        self.layer_types.get(layer).copied().unwrap_or(true)
+    }
 }
 
 impl Config {
     pub fn load(dir: &str) -> Config {
-        let j: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("{dir}/config.json")).expect("config.json")).unwrap();
+        let root: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("{dir}/config.json")).expect("config.json")).unwrap();
+        // Multimodal checkpoints (Qwen3.5) nest the language model under text_config.
+        let (j, prefix) = if root["text_config"].is_object() {
+            (root["text_config"].clone(), "model.language_model.".to_string())
+        } else {
+            (root.clone(), "model.".to_string())
+        };
         let u = |k: &str| j[k].as_u64().unwrap_or_else(|| panic!("config missing {k}")) as usize;
         let heads = u("num_attention_heads");
+        let head_dim = j["head_dim"].as_u64().map(|v| v as usize).unwrap_or(u("hidden_size") / heads);
+        let rope = &j["rope_parameters"];
+        let rope_theta = rope["rope_theta"].as_f64().or(j["rope_theta"].as_f64()).unwrap_or(10000.0) as f32;
+        let partial = rope["partial_rotary_factor"].as_f64().or(j["partial_rotary_factor"].as_f64()).unwrap_or(1.0);
+        let layer_types: Vec<bool> = j["layer_types"].as_array().map(|a| a.iter().map(|t| t.as_str() == Some("full_attention")).collect()).unwrap_or_default();
+        let lin = if j["linear_num_value_heads"].is_u64() {
+            Some(LinCfg { nk: u("linear_num_key_heads"), nv: u("linear_num_value_heads"), dk: u("linear_key_head_dim"), dv: u("linear_value_head_dim"), conv_k: u("linear_conv_kernel_dim") })
+        } else {
+            None
+        };
         Config {
+            rotary_dim: ((head_dim as f64 * partial) as usize).max(2) & !1,
+            attn_gate: j["attn_output_gate"].as_bool().unwrap_or(false),
+            layer_types,
+            lin,
+            prefix,
             hidden: u("hidden_size"),
             intermediate: u("intermediate_size"),
             layers: u("num_hidden_layers"),
             heads,
             kv_heads: u("num_key_value_heads"),
-            head_dim: j["head_dim"].as_u64().map(|v| v as usize).unwrap_or(u("hidden_size") / heads),
+            head_dim,
             vocab: u("vocab_size"),
-            rope_theta: j["rope_theta"].as_f64().unwrap_or(10000.0) as f32,
+            rope_theta,
             eps: j["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
             max_context: std::env::var("MAX_CONTEXT").ok().and_then(|v| v.parse().ok()).unwrap_or(4096),
             num_experts: j["num_experts"].as_u64().unwrap_or(0) as usize,
@@ -107,14 +156,27 @@ impl Config {
 
 pub(crate) struct Layer {
     pub(crate) ln1: Vec<f32>,
-    pub(crate) wq: Weight,
-    pub(crate) wk: Weight,
-    pub(crate) wv: Weight,
-    pub(crate) wo: Weight,
-    pub(crate) q_norm: Vec<f32>,
-    pub(crate) k_norm: Vec<f32>,
+    pub(crate) attn: Attn,
     pub(crate) ln2: Vec<f32>,
     pub(crate) mlp: Mlp,
+}
+
+pub(crate) enum Attn {
+    /// Softmax attention (Qwen3, and Qwen3.5 full_attention layers). With `gate`, wq has 2x rows:
+    /// per head [q(head_dim) | gate(head_dim)], and the head output is multiplied by sigmoid(gate).
+    Full { wq: Weight, wk: Weight, wv: Weight, wo: Weight, q_norm: Vec<f32>, k_norm: Vec<f32>, gate: bool },
+    /// Gated DeltaNet linear attention (Qwen3.5). Recurrent state instead of a KV cache.
+    Lin {
+        w_qkv: Weight,        // rows: [q: nk*dk | k: nk*dk | v: nv*dv]
+        w_z: Weight,          // value_dim gate
+        w_b: Weight,          // nv rows → beta
+        w_a: Weight,          // nv rows → decay input
+        conv_w: Vec<f32>,     // depthwise causal conv [conv_dim * conv_k], w[c*k + j], j = k-1 is current token
+        dt_bias: Vec<f32>,    // nv
+        a_log: Vec<f32>,      // nv
+        norm_w: Vec<f32>,     // dv (gated rmsnorm weight)
+        w_out: Weight,        // value_dim → hidden
+    },
 }
 
 pub struct Expert {
@@ -137,30 +199,53 @@ pub struct Model {
     pub(crate) lm_head: Weight, // tied to embed in small models; stored separately so it can be quantized
 }
 
-/// Per-sequence KV cache, one growable buffer per layer: memory ∝ tokens actually stored.
+/// Per-layer sequence state: KV rows for softmax attention, recurrent state for linear attention.
+#[derive(Clone)]
+pub(crate) enum LayerCache {
+    Kv { k: Vec<f32>, v: Vec<f32> },                 // pos * stride, growable
+    Lin { state: Vec<f32>, conv: Vec<f32> },         // nv*dk*dv, conv_dim*(conv_k-1); empty until first use
+}
+
 #[derive(Clone)]
 pub struct KvCache {
-    k: Vec<Vec<f32>>, // [layer][pos * stride]
-    v: Vec<Vec<f32>>,
-    stride: usize,
+    pub(crate) layers: Vec<LayerCache>,
+    pub(crate) stride: usize,
     pub len: usize,
+    hybrid: bool,
 }
 
 impl KvCache {
     pub fn new(cfg: &Config) -> KvCache {
         let stride = cfg.kv_heads * cfg.head_dim;
-        KvCache { k: (0..cfg.layers).map(|_| Vec::new()).collect(), v: (0..cfg.layers).map(|_| Vec::new()).collect(), stride, len: 0 }
+        let layers = (0..cfg.layers).map(|l| if cfg.is_full(l) {
+            LayerCache::Kv { k: Vec::new(), v: Vec::new() }
+        } else {
+            LayerCache::Lin { state: Vec::new(), conv: Vec::new() }
+        }).collect();
+        let hybrid = cfg.lin.is_some();
+        KvCache { layers, stride, len: 0, hybrid }
     }
 
     pub fn bytes(&self) -> usize {
-        self.k.iter().map(|l| l.capacity() * 8).sum()
+        self.layers.iter().map(|l| match l {
+            LayerCache::Kv { k, .. } => k.capacity() * 8,
+            LayerCache::Lin { state, conv } => (state.capacity() + conv.capacity()) * 4,
+        }).sum()
     }
 
-    /// Drop everything after the first `n` positions.
+    /// Recurrent state cannot be rolled back: hybrid caches only "truncate" to their current length.
+    pub fn can_truncate(&self, n: usize) -> bool {
+        !self.hybrid || n == self.len
+    }
+
+    /// Drop everything after the first `n` positions (see can_truncate).
     pub fn truncate(&mut self, n: usize) {
-        for l in 0..self.k.len() {
-            self.k[l].truncate(n * self.stride);
-            self.v[l].truncate(n * self.stride);
+        assert!(self.can_truncate(n), "cannot roll back recurrent state ({} -> {n})", self.len);
+        for l in &mut self.layers {
+            if let LayerCache::Kv { k, v } = l {
+                k.truncate(n * self.stride);
+                v.truncate(n * self.stride);
+            }
         }
         self.len = n;
     }
@@ -171,12 +256,28 @@ impl Model {
     pub fn weight_bytes(&self) -> usize {
         let mut b = self.lm_head.bytes();
         for l in &self.layers {
-            b += l.wq.bytes() + l.wk.bytes() + l.wv.bytes() + l.wo.bytes();
+            b += match &l.attn {
+                Attn::Full { wq, wk, wv, wo, .. } => wq.bytes() + wk.bytes() + wv.bytes() + wo.bytes(),
+                Attn::Lin { w_qkv, w_z, w_b, w_a, w_out, .. } => w_qkv.bytes() + w_z.bytes() + w_b.bytes() + w_a.bytes() + w_out.bytes(),
+            };
             if let Mlp::Dense(e) = &l.mlp {
                 b += e.w_gate.bytes() + e.w_up.bytes() + e.w_down.bytes();
             }
         }
         b
+    }
+
+    /// True when the model needs no recurrent-state rollback (speculation-safe).
+    pub fn supports_rollback(&self) -> bool {
+        self.config.lin.is_none()
+    }
+
+    /// v1 GPU backend handles plain Qwen3 dense: softmax attention without gates, full rotary.
+    pub fn gpu_supported(&self) -> bool {
+        self.layers_mlp_dense()
+            && self.config.lin.is_none()
+            && !self.config.attn_gate
+            && self.config.rotary_dim == self.config.head_dim
     }
 
     /// True when every MLP is dense (the GPU backend doesn't do MoE yet).
@@ -195,15 +296,34 @@ impl Model {
         let quant = quant.to_string();
         let mut layers = Vec::with_capacity(config.layers);
         for l in 0..config.layers {
-            let p = format!("model.layers.{l}.");
+            let p = format!("{}layers.{l}.", config.prefix);
+            let attn = if config.is_full(l) {
+                Attn::Full {
+                    wq: Weight::load(&st, &format!("{p}self_attn.q_proj.weight"), &quant),
+                    wk: Weight::load(&st, &format!("{p}self_attn.k_proj.weight"), &quant),
+                    wv: Weight::load(&st, &format!("{p}self_attn.v_proj.weight"), &quant),
+                    wo: Weight::load(&st, &format!("{p}self_attn.o_proj.weight"), &quant),
+                    q_norm: st.f32(&format!("{p}self_attn.q_norm.weight")),
+                    k_norm: st.f32(&format!("{p}self_attn.k_norm.weight")),
+                    gate: config.attn_gate,
+                }
+            } else {
+                Attn::Lin {
+                    w_qkv: Weight::load(&st, &format!("{p}linear_attn.in_proj_qkv.weight"), &quant),
+                    w_z: Weight::load(&st, &format!("{p}linear_attn.in_proj_z.weight"), &quant),
+                    // beta/decay projections are tiny and numerically sensitive: keep full precision
+                    w_b: Weight::load(&st, &format!("{p}linear_attn.in_proj_b.weight"), "bf16"),
+                    w_a: Weight::load(&st, &format!("{p}linear_attn.in_proj_a.weight"), "bf16"),
+                    conv_w: st.f32(&format!("{p}linear_attn.conv1d.weight")),
+                    dt_bias: st.f32(&format!("{p}linear_attn.dt_bias")),
+                    a_log: st.f32(&format!("{p}linear_attn.A_log")),
+                    norm_w: st.f32(&format!("{p}linear_attn.norm.weight")),
+                    w_out: Weight::load(&st, &format!("{p}linear_attn.out_proj.weight"), &quant),
+                }
+            };
             layers.push(Layer {
                 ln1: st.f32(&format!("{p}input_layernorm.weight")),
-                wq: Weight::load(&st, &format!("{p}self_attn.q_proj.weight"), &quant),
-                wk: Weight::load(&st, &format!("{p}self_attn.k_proj.weight"), &quant),
-                wv: Weight::load(&st, &format!("{p}self_attn.v_proj.weight"), &quant),
-                wo: Weight::load(&st, &format!("{p}self_attn.o_proj.weight"), &quant),
-                q_norm: st.f32(&format!("{p}self_attn.q_norm.weight")),
-                k_norm: st.f32(&format!("{p}self_attn.k_norm.weight")),
+                attn,
                 ln2: st.f32(&format!("{p}post_attention_layernorm.weight")),
                 mlp: if st.has(&format!("{p}mlp.gate.weight")) {
                     let experts = (0..config.num_experts).map(|e| Expert {
@@ -224,13 +344,16 @@ impl Model {
                 },
             });
         }
-        let hd = config.head_dim;
-        let inv_freq: Vec<f32> = (0..hd / 2).map(|i| 1.0 / config.rope_theta.powf(2.0 * i as f32 / hd as f32)).collect();
+        let rd = config.rotary_dim;
+        let inv_freq: Vec<f32> = (0..rd / 2).map(|i| 1.0 / config.rope_theta.powf(2.0 * i as f32 / rd as f32)).collect();
         let m = Model {
             inv_freq,
-            embed: st.bf16("model.embed_tokens.weight"),
-            norm: st.f32("model.norm.weight"),
-            lm_head: Weight::load(&st, if st.has("lm_head.weight") { "lm_head.weight" } else { "model.embed_tokens.weight" }, &quant),
+            embed: st.bf16(&format!("{}embed_tokens.weight", config.prefix)),
+            norm: st.f32(&format!("{}norm.weight", config.prefix)),
+            lm_head: {
+                let name = if st.has("lm_head.weight") { "lm_head.weight".to_string() } else { format!("{}embed_tokens.weight", config.prefix) };
+                Weight::load(&st, &name, &quant)
+            },
             layers,
             config,
         };
@@ -240,7 +363,11 @@ impl Model {
         let mut bytes = m.lm_head.bytes();
         let mut active = m.lm_head.bytes();
         for l in &m.layers {
-            for w in [&l.wq, &l.wk, &l.wv, &l.wo] {
+            let ws: Vec<&Weight> = match &l.attn {
+                Attn::Full { wq, wk, wv, wo, .. } => vec![wq, wk, wv, wo],
+                Attn::Lin { w_qkv, w_z, w_b, w_a, w_out, .. } => vec![w_qkv, w_z, w_b, w_a, w_out],
+            };
+            for w in ws {
                 params += w.params();
                 bytes += w.bytes();
                 active += w.bytes();
@@ -303,8 +430,9 @@ impl Model {
             seen[sq] += 1;
             assert!(pos[j] < c.max_context, "context full");
         }
-        // Rotary cos/sin per item (same for every layer and head).
-        let half = hd / 2;
+        // Rotary cos/sin per item (same for every layer and head). Partial rotary: only the
+        // first rotary_dim dims of each head rotate (rotate_half pairs within that slice).
+        let half = c.rotary_dim / 2;
         let mut rcos = vec![0f32; m * half];
         let mut rsin = vec![0f32; m * half];
         for j in 0..m {
@@ -326,11 +454,31 @@ impl Model {
         order.reverse();
         for (sq, n) in seen.iter().enumerate() {
             let need = (caches[sq].len + n) * stride;
-            for l in 0..c.layers {
-                if caches[sq].k[l].len() < need {
-                    caches[sq].k[l].resize(need, 0.0);
-                    caches[sq].v[l].resize(need, 0.0);
+            for lc in caches[sq].layers.iter_mut() {
+                match lc {
+                    LayerCache::Kv { k, v } => {
+                        if k.len() < need {
+                            k.resize(need, 0.0);
+                            v.resize(need, 0.0);
+                        }
+                    }
+                    LayerCache::Lin { state, conv } => {
+                        if let Some(lin) = &c.lin {
+                            if state.is_empty() {
+                                state.resize(lin.nv * lin.dk * lin.dv, 0.0);
+                                conv.resize(lin.conv_dim() * (lin.conv_k - 1), 0.0);
+                            }
+                        }
+                    }
                 }
+            }
+        }
+        // Contiguous per-sequence item ranges (required for the recurrent layers).
+        let mut ranges: Vec<(usize, usize, usize)> = Vec::new(); // (seq, start, count)
+        for (j, &(_, sq)) in items.iter().enumerate() {
+            match ranges.last_mut() {
+                Some(r) if r.0 == sq => r.2 += 1,
+                _ => ranges.push((sq, j, 1)),
             }
         }
 
@@ -349,11 +497,17 @@ impl Model {
                 *tick = std::time::Instant::now();
             }
         };
+        let qrows = if c.attn_gate { 2 * qd } else { qd };
         let mut hn = vec![0.0; m * c.hidden];
-        let mut q = vec![0.0; m * qd];
+        let mut q = vec![0.0; m * qrows];
         let mut k = vec![0.0; m * kd];
         let mut v = vec![0.0; m * kd];
         let mut attn = vec![0.0; m * qd];
+        // linear-attention scratch (allocated only for hybrid models)
+        let (mut lqkv, mut lz, mut la, mut lb, mut lo) = match &c.lin {
+            Some(lin) => (vec![0.0f32; m * lin.conv_dim()], vec![0.0f32; m * lin.value_dim()], vec![0.0f32; m * lin.nv], vec![0.0f32; m * lin.nv], vec![0.0f32; m * lin.value_dim()]),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        };
         let mut o = vec![0.0; m * c.hidden];
         let mut gate = vec![0.0; m * c.intermediate];
         let mut up = vec![0.0; m * c.intermediate];
@@ -363,38 +517,97 @@ impl Model {
             for j in 0..m {
                 rmsnorm(&mut hn[j * c.hidden..(j + 1) * c.hidden], &l.ln1, c.eps);
             }
-            l.wq.matmul(&hn, m, &mut q);
-            l.wk.matmul(&hn, m, &mut k);
-            l.wv.matmul(&hn, m, &mut v);
-            lap(0, &mut tick);
-            for j in 0..m {
-                let p = pos[j];
-                let (cs, sn) = (&rcos[j * half..(j + 1) * half], &rsin[j * half..(j + 1) * half]);
-                for hi in 0..h {
-                    let qh = &mut q[j * qd + hi * hd..j * qd + (hi + 1) * hd];
-                    rmsnorm(qh, &l.q_norm, c.eps);
-                    rope_tab(qh, cs, sn);
+            match &l.attn {
+                Attn::Full { wq, wk, wv, wo, q_norm, k_norm, gate } => {
+                    wq.matmul(&hn, m, &mut q);
+                    wk.matmul(&hn, m, &mut k);
+                    wv.matmul(&hn, m, &mut v);
+                    lap(0, &mut tick);
+                    // Per head, wq rows are [q | gate] when gated; q_norm/rope apply to the q part.
+                    let qstride = if *gate { 2 * hd } else { hd };
+                    for j in 0..m {
+                        let p = pos[j];
+                        let (cs, sn) = (&rcos[j * half..(j + 1) * half], &rsin[j * half..(j + 1) * half]);
+                        for hi in 0..h {
+                            let qh = &mut q[j * qrows + hi * qstride..j * qrows + hi * qstride + hd];
+                            rmsnorm(qh, q_norm, c.eps);
+                            rope_tab(&mut qh[..c.rotary_dim], cs, sn);
+                        }
+                        for hi in 0..kvh {
+                            let kh = &mut k[j * kd + hi * hd..j * kd + (hi + 1) * hd];
+                            rmsnorm(kh, k_norm, c.eps);
+                            rope_tab(&mut kh[..c.rotary_dim], cs, sn);
+                        }
+                        if let LayerCache::Kv { k: ck, v: cv } = &mut caches[items[j].1].layers[li] {
+                            ck[p * stride..(p + 1) * stride].copy_from_slice(&k[j * kd..(j + 1) * kd]);
+                            cv[p * stride..(p + 1) * stride].copy_from_slice(&v[j * kd..(j + 1) * kd]);
+                        }
+                    }
+                    lap(1, &mut tick);
+                    {
+                        // Gather q parts contiguously when gated (attention expects heads*hd rows).
+                        let qbuf: &[f32] = if *gate {
+                            for j in 0..m {
+                                for hi in 0..h {
+                                    for d in 0..hd {
+                                        attn[j * qd + hi * hd + d] = q[j * qrows + hi * qstride + d];
+                                    }
+                                }
+                            }
+                            // attn temporarily holds gathered q; use v buffer? keep simple: copy into a fresh slice
+                            &attn
+                        } else {
+                            &q
+                        };
+                        let qgathered: Vec<f32> = qbuf[..m * qd].to_vec();
+                        let kv: Vec<(&[f32], &[f32], usize)> = (0..m).map(|j| {
+                            match &caches[items[j].1].layers[li] {
+                                LayerCache::Kv { k: ck, v: cv } => {
+                                    let end = (pos[j] + 1) * stride;
+                                    (&ck[..end], &cv[..end], pos[j])
+                                }
+                                _ => unreachable!(),
+                            }
+                        }).collect();
+                        attention_multi(&qgathered, &kv, stride, h, kvh, hd, &mut attn);
+                    }
+                    if *gate {
+                        for j in 0..m {
+                            for hi in 0..h {
+                                for d in 0..hd {
+                                    let g = q[j * qrows + hi * qstride + hd + d];
+                                    attn[j * qd + hi * hd + d] *= 1.0 / (1.0 + (-g).exp());
+                                }
+                            }
+                        }
+                    }
+                    lap(2, &mut tick);
+                    wo.matmul(&attn, m, &mut o);
                 }
-                for hi in 0..kvh {
-                    let kh = &mut k[j * kd + hi * hd..j * kd + (hi + 1) * hd];
-                    rmsnorm(kh, &l.k_norm, c.eps);
-                    rope_tab(kh, cs, sn);
+                Attn::Lin { w_qkv, w_z, w_b, w_a, conv_w, dt_bias, a_log, norm_w, w_out } => {
+                    let lin = c.lin.as_ref().unwrap();
+                    w_qkv.matmul(&hn, m, &mut lqkv);
+                    w_z.matmul(&hn, m, &mut lz);
+                    w_b.matmul(&hn, m, &mut lb);
+                    w_a.matmul(&hn, m, &mut la);
+                    lap(0, &mut tick);
+                    for &(sq, start, count) in &ranges {
+                        let (state, conv) = match &mut caches[sq].layers[li] {
+                            LayerCache::Lin { state, conv } => (state, conv),
+                            _ => unreachable!(),
+                        };
+                        delta_net(lin, conv_w, dt_bias, a_log, norm_w, c.eps,
+                            &mut lqkv[start * lin.conv_dim()..(start + count) * lin.conv_dim()],
+                            &lz[start * lin.value_dim()..(start + count) * lin.value_dim()],
+                            &la[start * lin.nv..(start + count) * lin.nv],
+                            &lb[start * lin.nv..(start + count) * lin.nv],
+                            state, conv, count,
+                            &mut lo[start * lin.value_dim()..(start + count) * lin.value_dim()]);
+                    }
+                    lap(2, &mut tick);
+                    w_out.matmul(&lo, m, &mut o);
                 }
-                let cache = &mut *caches[items[j].1];
-                cache.k[li][p * stride..(p + 1) * stride].copy_from_slice(&k[j * kd..(j + 1) * kd]);
-                cache.v[li][p * stride..(p + 1) * stride].copy_from_slice(&v[j * kd..(j + 1) * kd]);
             }
-            lap(1, &mut tick);
-            {
-                let kv: Vec<(&[f32], &[f32], usize)> = (0..m).map(|j| {
-                    let cache = &*caches[items[j].1];
-                    let end = (pos[j] + 1) * stride;
-                    (&cache.k[li][..end], &cache.v[li][..end], pos[j])
-                }).collect();
-                attention_multi(&q, &kv, stride, h, kvh, hd, &mut attn);
-            }
-            lap(2, &mut tick);
-            l.wo.matmul(&attn, m, &mut o);
             for i in 0..m * c.hidden {
                 x[i] += o[i];
             }
@@ -499,6 +712,151 @@ impl Model {
     }
 }
 
+
+/// Gated DeltaNet for `count` consecutive tokens of one sequence (transcribed from the
+/// Hugging Face qwen3_5 reference: causal_conv1d + torch_recurrent_gated_delta_rule).
+///
+/// qkv: count x conv_dim rows (modified in place by the conv), z: count x value_dim,
+/// a/b: count x nv. state: nv*dk*dv recurrent memory, conv: conv_dim*(conv_k-1) rolling window.
+/// out: count x value_dim = gated-rmsnorm(delta-rule output) per head.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn delta_net(
+    lin: &LinCfg,
+    conv_w: &[f32],
+    dt_bias: &[f32],
+    a_log: &[f32],
+    norm_w: &[f32],
+    eps: f32,
+    qkv: &mut [f32],
+    z: &[f32],
+    a: &[f32],
+    b: &[f32],
+    state: &mut [f32],
+    conv: &mut [f32],
+    count: usize,
+    out: &mut [f32],
+) {
+    let cd = lin.conv_dim();
+    let kk = lin.conv_k;
+    let (nk, nv, dk, dv) = (lin.nk, lin.nv, lin.dk, lin.dv);
+    let group = nv / nk;
+    let key_dim = lin.key_dim();
+
+    // --- depthwise causal conv over time, per channel, then SiLU (parallel over channel chunks) ---
+    {
+        let qp = crate::kernels::SendPtrPub(qkv.as_mut_ptr());
+        let cp = crate::kernels::SendPtrPub(conv.as_mut_ptr());
+        crate::pool::global().run((cd + 255) / 256, &|chunk| {
+            let c0 = chunk * 256;
+            let c1 = (c0 + 256).min(cd);
+            for ch in c0..c1 {
+                let w = &conv_w[ch * kk..(ch + 1) * kk];
+                // rolling window: conv[ch*(kk-1) ..] holds the previous kk-1 raw inputs
+                let mut win = [0f32; 8];
+                for j in 0..kk - 1 {
+                    win[j] = unsafe { *cp.get().add(ch * (kk - 1) + j) };
+                }
+                for t in 0..count {
+                    let cur = unsafe { *qp.get().add(t * cd + ch) };
+                    win[kk - 1] = cur;
+                    let mut acc = 0f32;
+                    for j in 0..kk {
+                        acc += w[j] * win[j];
+                    }
+                    let y = acc / (1.0 + (-acc).exp()); // silu
+                    unsafe { *qp.get().add(t * cd + ch) = y };
+                    for j in 0..kk - 1 {
+                        win[j] = win[j + 1];
+                    }
+                }
+                for j in 0..kk - 1 {
+                    unsafe { *cp.get().add(ch * (kk - 1) + j) = win[j] };
+                }
+            }
+        });
+    }
+
+    // --- per-token decay/beta ---
+    let mut gdecay = vec![0f32; count * nv];
+    let mut beta = vec![0f32; count * nv];
+    for t in 0..count {
+        for hv in 0..nv {
+            let softplus = {
+                let x = a[t * nv + hv] + dt_bias[hv];
+                if x > 20.0 { x } else { (1.0 + x.exp()).ln() }
+            };
+            gdecay[t * nv + hv] = (-a_log[hv].exp() * softplus).exp();
+            beta[t * nv + hv] = 1.0 / (1.0 + (-b[t * nv + hv]).exp());
+        }
+    }
+
+    // --- delta rule recurrence, parallel over value heads (each head's chain is independent) ---
+    let sp = crate::kernels::SendPtrPub(state.as_mut_ptr());
+    let op = crate::kernels::SendPtrPub(out.as_mut_ptr());
+    let qkv_ro: &[f32] = qkv;
+    crate::pool::global().run(nv, &|hv| {
+        let hk = hv / group; // key head serving this value head (repeat_interleave)
+        let st = unsafe { std::slice::from_raw_parts_mut(sp.get().add(hv * dk * dv), dk * dv) };
+        let scale = 1.0 / (dk as f32).sqrt();
+        let mut qh = vec![0f32; dk];
+        let mut kh = vec![0f32; dk];
+        let mut delta = vec![0f32; dv];
+        for t in 0..count {
+            let row = &qkv_ro[t * cd..(t + 1) * cd];
+            // l2-normalize q and k per key head (fla: x * rsqrt(sum(x^2) + eps))
+            let qsrc = &row[hk * dk..(hk + 1) * dk];
+            let ksrc = &row[key_dim + hk * dk..key_dim + (hk + 1) * dk];
+            let qn = 1.0 / (qsrc.iter().map(|v| v * v).sum::<f32>() + 1e-6).sqrt();
+            let knn = 1.0 / (ksrc.iter().map(|v| v * v).sum::<f32>() + 1e-6).sqrt();
+            for d in 0..dk {
+                qh[d] = qsrc[d] * qn * scale;
+                kh[d] = ksrc[d] * knn;
+            }
+            let vh = &row[2 * key_dim + hv * dv..2 * key_dim + (hv + 1) * dv];
+            let g = gdecay[t * nv + hv];
+            let bt = beta[t * nv + hv];
+            // state = g*state; kv_mem = k·state; delta = (v - kv_mem)*beta; state += k ⊗ delta; o = q·state
+            for x in st.iter_mut() {
+                *x *= g;
+            }
+            for dvi in 0..dv {
+                delta[dvi] = vh[dvi];
+            }
+            for d in 0..dk {
+                let kd_ = kh[d];
+                if kd_ != 0.0 {
+                    let srow = &st[d * dv..(d + 1) * dv];
+                    for dvi in 0..dv {
+                        delta[dvi] -= kd_ * srow[dvi];
+                    }
+                }
+            }
+            for dvi in 0..dv {
+                delta[dvi] *= bt;
+            }
+            let mut oh = vec![0f32; dv];
+            for d in 0..dk {
+                let srow = &mut st[d * dv..(d + 1) * dv];
+                let kd_ = kh[d];
+                let qd_ = qh[d];
+                for dvi in 0..dv {
+                    srow[dvi] += kd_ * delta[dvi];
+                    oh[dvi] += qd_ * srow[dvi];
+                }
+            }
+            // gated rmsnorm: rmsnorm(o)*w * silu(z)
+            let ss = oh.iter().map(|v| v * v).sum::<f32>() / dv as f32;
+            let inv = 1.0 / (ss + eps).sqrt();
+            let zh = &z[t * lin.value_dim() + hv * dv..t * lin.value_dim() + (hv + 1) * dv];
+            let od = unsafe { std::slice::from_raw_parts_mut(op.get().add(t * lin.value_dim() + hv * dv), dv) };
+            for dvi in 0..dv {
+                let zg = zh[dvi];
+                od[dvi] = oh[dvi] * inv * norm_w[dvi] * (zg / (1.0 + (-zg).exp()));
+            }
+        }
+    });
+}
+
 /// Temperature + top-p sampling. temperature 0 → greedy.
 pub struct Sampler {
     pub temperature: f32,
@@ -578,13 +936,17 @@ mod tests {
     /// tokens one at a time must give the same result as running them as one batch.
     fn tiny_moe() -> Model {
         let config = Config { hidden: 64, intermediate: 128, layers: 2, heads: 4, kv_heads: 2, head_dim: 16, vocab: 100,
-            rope_theta: 10000.0, eps: 1e-6, max_context: 64, num_experts: 8, experts_per_tok: 2, moe_intermediate: 32, norm_topk_prob: true };
+            rope_theta: 10000.0, eps: 1e-6, max_context: 64, num_experts: 8, experts_per_tok: 2, moe_intermediate: 32, norm_topk_prob: true,
+            rotary_dim: 16, attn_gate: false, layer_types: Vec::new(), lin: None, prefix: "model.".into() };
         let hd = config.head_dim;
         let layers = (0..config.layers).map(|l| Layer {
             ln1: vec![1.0; config.hidden],
-            wq: rand_w(config.heads * hd, config.hidden, 1 + l as u32 * 10), wk: rand_w(config.kv_heads * hd, config.hidden, 2 + l as u32 * 10),
-            wv: rand_w(config.kv_heads * hd, config.hidden, 3 + l as u32 * 10), wo: rand_w(config.hidden, config.heads * hd, 4 + l as u32 * 10),
-            q_norm: vec![1.0; hd], k_norm: vec![1.0; hd], ln2: vec![1.0; config.hidden],
+            attn: Attn::Full {
+                wq: rand_w(config.heads * hd, config.hidden, 1 + l as u32 * 10), wk: rand_w(config.kv_heads * hd, config.hidden, 2 + l as u32 * 10),
+                wv: rand_w(config.kv_heads * hd, config.hidden, 3 + l as u32 * 10), wo: rand_w(config.hidden, config.heads * hd, 4 + l as u32 * 10),
+                q_norm: vec![1.0; hd], k_norm: vec![1.0; hd], gate: false,
+            },
+            ln2: vec![1.0; config.hidden],
             mlp: Mlp::Moe {
                 router: (0..config.num_experts * config.hidden).map(|i| ((i * 37 % 101) as f32 / 101.0 - 0.5) * 0.2).collect(),
                 experts: (0..config.num_experts).map(|e| Expert {

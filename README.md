@@ -30,7 +30,7 @@ load-balances across N of them, stats are aggregated centrally.
 ## Milestones
 
 1. **Gateway + admin running with a mock engine** (this scaffold) — playground streams, stats flow.
-2. ~~**Engine M1 – correctness**~~ done: safetensors loader, byte-level BPE (matches HF exactly), Qwen3 forward pass.
+2. ~~**Engine M1 – correctness**~~ done: safetensors loader, byte-level BPE (matches HF exactly), Qwen3 dense+MoE forward pass, **Qwen3.5 hybrid** (gated DeltaNet linear attention + gated full attention, validated against the HF reference via `--fixture` + `scripts/make_q35_fixture.py`). Qwen3.5 runs on CPU; speculation/prefix-rollback auto-disabled (recurrent state).
 3. **Engine M2 – speed**: ~~thread pool, AVX2 kernels, batched prefill, Q8~~ done; next: int4, AVX-512/AMX, KV-cache int8, speculative decoding.
 4. **Engine M3 – throughput**: ~~continuous batching~~ done; next: chunked prefill, prefix cache, paged KV. Benchmark vs llama.cpp.
 5. **Provider launch**: ~~OpenRouter `/models` document (schema 2.4), early 429s, cached-token billing, SSE keep-alives, stop sequences~~ done; next: domain + TLS, uptime monitoring, tool calling, apply.

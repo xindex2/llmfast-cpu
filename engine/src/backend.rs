@@ -22,6 +22,13 @@ impl Kv {
             Kv::Gpu(g) => g.len,
         }
     }
+    pub fn can_truncate(&self, n: usize) -> bool {
+        match self {
+            Kv::Cpu(c) => c.can_truncate(n),
+            Kv::Gpu(_) => true,
+        }
+    }
+
     pub fn truncate(&mut self, n: usize) {
         match self {
             Kv::Cpu(c) => c.truncate(n),
@@ -41,6 +48,15 @@ impl Net {
         match self {
             Net::Cpu(m) => &m.config,
             Net::Gpu(g) => &g.config,
+        }
+    }
+
+    /// False for recurrent (hybrid linear-attention) models: their state cannot be rolled back,
+    /// so speculative decoding and partial prefix reuse are disabled.
+    pub fn supports_rollback(&self) -> bool {
+        match self {
+            Net::Cpu(m) => m.supports_rollback(),
+            Net::Gpu(_) => true,
         }
     }
 

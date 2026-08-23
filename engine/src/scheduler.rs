@@ -65,8 +65,12 @@ impl PrefixCache {
     /// Longest cached prefix of `prompt` (leaving at least one token to prefill, so we get logits).
     fn lookup(&mut self, net: &Net, prompt: &[u32]) -> Option<(usize, Kv)> {
         let mut best: Option<(usize, usize)> = None; // (len, entry index)
-        for (i, (toks, _, _)) in self.entries.iter().enumerate() {
-            let n = toks.iter().zip(prompt).take_while(|(a, b)| a == b).count().min(prompt.len() - 1);
+        for (i, (toks, kv, _)) in self.entries.iter().enumerate() {
+            let mut n = toks.iter().zip(prompt).take_while(|(a, b)| a == b).count().min(prompt.len() - 1);
+            if !kv.can_truncate(n) {
+                // recurrent caches are reusable only whole: entry tokens must be a prompt prefix
+                if n == kv.len() { /* whole entry reused */ } else { n = 0; }
+            }
             if n >= MIN_PREFIX && best.map_or(true, |(bl, _)| n > bl) {
                 best = Some((n, i));
             }
@@ -111,12 +115,16 @@ impl Scheduler {
 
 fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
     crate::pool::set_ftz_daz();
+    let rollback = model.supports_rollback();
+    if !rollback {
+        eprintln!("recurrent model: speculative decoding and partial prefix reuse disabled");
+    }
     let spec_k: usize = std::env::var("SPEC_K").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
-    let spec_k = if draft.is_some() { spec_k } else { 0 };
+    let spec_k = if draft.is_some() && rollback { spec_k } else { 0 };
     // Prompt-lookup / n-gram speculation: draft from earlier occurrences in the sequence itself.
     let ngram_n: usize = std::env::var("NGRAM_N").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let ngram_k: usize = std::env::var("NGRAM_K").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
-    let ngram_on = std::env::var("NGRAM").map_or(true, |v| v != "0");
+    let ngram_on = rollback && std::env::var("NGRAM").map_or(true, |v| v != "0");
     let mut active: Vec<Seq> = Vec::new();
     let mut prefix = PrefixCache::new(if model.device() == "gpu" { 512 } else { 1024 });
     loop {
@@ -259,7 +267,11 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
                 }
             }
             // target cache holds base-1 + (k+1) positions; keep exactly committed[..len-1]
-            s.cache.truncate(s.committed.len() - 1);
+            if s.cache.can_truncate(s.committed.len() - 1) {
+                s.cache.truncate(s.committed.len() - 1);
+            } else {
+                debug_assert_eq!(s.cache.len(), s.committed.len() - 1, "recurrent cache out of sync");
+            }
             let _ = base;
             match finished {
                 Some(f) => finish_seq(s, f),
