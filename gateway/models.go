@@ -253,7 +253,7 @@ func (r *Registry) Start(id string) error {
 	}
 	e := *m
 	r.store.mu.Unlock()
-	if e.Status != "ready" && e.Status != "running" {
+	if e.Status != "ready" && e.Status != "running" && e.Status != "starting" {
 		return fmt.Errorf("model is %s", e.Status)
 	}
 	r.mu.Lock()
@@ -289,7 +289,31 @@ func (r *Registry) Start(id string) error {
 	eng.model = id
 	r.server.addEngine(eng)
 	pid := cmd.Process.Pid
-	r.update(id, func(m *ModelEntry) { m.Status = "running"; m.Port = port; m.Pid = pid; m.Error = "" })
+	r.update(id, func(m *ModelEntry) { m.Status = "starting"; m.Port = port; m.Pid = pid; m.Error = "" })
+	// Big checkpoints quantize for minutes at startup: flip to "running" when /health answers.
+	go func() {
+		eng := NewHTTPEngine(fmt.Sprintf("http://127.0.0.1:%d", port))
+		for i := 0; i < 900; i++ { // up to 30 min
+			time.Sleep(2 * time.Second)
+			r.store.mu.Lock()
+			cur := ""
+			if m := r.find(id); m != nil {
+				cur = m.Status
+			}
+			r.store.mu.Unlock()
+			if cur != "starting" {
+				return // exited or was stopped
+			}
+			if eng.Healthy() {
+				r.update(id, func(m *ModelEntry) {
+					if m.Status == "starting" {
+						m.Status = "running"
+					}
+				})
+				return
+			}
+		}
+	}()
 	go func() {
 		err := cmd.Wait()
 		r.mu.Lock()
@@ -301,7 +325,7 @@ func (r *Registry) Start(id string) error {
 			msg = "engine exited: " + err.Error() + " (see engine.log in the model dir)"
 		}
 		r.update(id, func(m *ModelEntry) {
-			if m.Status == "running" {
+			if m.Status == "running" || m.Status == "starting" {
 				m.Status = "ready"
 				m.Port = 0
 				m.Error = msg

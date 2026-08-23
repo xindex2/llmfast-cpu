@@ -296,6 +296,9 @@ impl Model {
         let quant = quant.to_string();
         let mut layers = Vec::with_capacity(config.layers);
         for l in 0..config.layers {
+            if l % 8 == 0 {
+                eprintln!("loading layer {l}/{} ({quant})...", config.layers);
+            }
             let p = format!("{}layers.{l}.", config.prefix);
             let attn = if config.is_full(l) {
                 Attn::Full {
