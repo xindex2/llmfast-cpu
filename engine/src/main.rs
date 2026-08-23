@@ -98,16 +98,25 @@ fn main() {
         eprintln!("device: auto → cpu (model {:.2} GB vs GPU_MEM_MB={gpu_mem_mb}; set DEVICE=gpu to force)", model.weight_bytes() as f64 / 1e9);
     }
     let net = if (want == "gpu" || (want == "auto" && fits)) && model.layers_mlp_dense() {
-        match gpu::Gpu::init() {
-            Some(g) => {
+        // Any failure inside the GPU stack (driver quirks, limits) must not take the engine down.
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gpu::Gpu::init().map(|g| {
                 let cfg = model.config.clone();
                 if cfg.max_context > gpu_model::GPU_MAX_CONTEXT {
                     eprintln!("gpu: context capped at {} (MAX_CONTEXT={})", gpu_model::GPU_MAX_CONTEXT, cfg.max_context);
                 }
-                backend::Net::Gpu(Arc::new(gpu_model::GpuModel::from_cpu(g, &model)))
+                gpu_model::GpuModel::from_cpu(g, &model)
+            })
+        }));
+        match attempt {
+            Ok(Some(gm)) => backend::Net::Gpu(Arc::new(gm)),
+            Ok(None) => {
+                if want == "gpu" { panic!("DEVICE=gpu but no usable GPU adapter found"); }
+                backend::Net::Cpu(Arc::new(model))
             }
-            None => {
-                if want == "gpu" { panic!("DEVICE=gpu but no GPU adapter found"); }
+            Err(_) => {
+                if want == "gpu" { panic!("DEVICE=gpu but GPU initialization failed (see messages above)"); }
+                eprintln!("gpu: initialization failed, falling back to cpu");
                 backend::Net::Cpu(Arc::new(model))
             }
         }

@@ -41,6 +41,13 @@ impl Gpu {
             ..Default::default()
         }))?;
         let info = adapter.get_info();
+        // Software rasterizers (llvmpipe, SwiftShader) show up as adapters on headless servers; they
+        // are far slower than our CPU kernels and hit validation limits. Only real GPUs qualify.
+        let software = matches!(info.device_type, wgpu::DeviceType::Cpu) || info.name.to_lowercase().contains("llvmpipe") || info.name.to_lowercase().contains("swiftshader");
+        if software && std::env::var("DEVICE").map_or(true, |v| v != "gpu") {
+            eprintln!("gpu: ignoring software adapter {} ({:?})", info.name, info.device_type);
+            return None;
+        }
         let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {

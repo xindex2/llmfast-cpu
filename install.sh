@@ -9,7 +9,7 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
 echo "== packages"
 $SUDO apt-get update -qq
-$SUDO apt-get install -y -qq build-essential curl git pkg-config ca-certificates libvulkan1 mesa-vulkan-drivers >/dev/null
+$SUDO apt-get install -y -qq build-essential curl git pkg-config ca-certificates libvulkan1 >/dev/null   # (GPU boxes: see docs/install-gpu-runpod.md for the vendor Vulkan ICD)
 
 echo "== rust"
 if ! command -v cargo >/dev/null; then curl -sSf https://sh.rustup.rs | sh -s -- -y -q; fi
