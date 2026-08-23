@@ -1,0 +1,10 @@
+# Caddy terminates TLS for api.llmfa.st (automatic Let's Encrypt) and proxies to the gateway.
+api.llmfa.st {
+    reverse_proxy localhost:8080 {
+        flush_interval -1      # stream SSE tokens immediately
+        transport http {
+            read_timeout 10m   # long generations
+        }
+    }
+    encode zstd gzip
+}

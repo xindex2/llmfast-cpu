@@ -1,0 +1,20 @@
+[package]
+name = "forge-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Deliberately minimal: the inference math is all ours. These only handle file formats.
+serde_json = "1"
+memmap2 = "0.9"
+# GPU backend: wgpu is a driver abstraction (Metal / Vulkan / DX12); every compute shader is ours (src/shaders.wgsl).
+wgpu = "24"
+pollster = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

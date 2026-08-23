@@ -1,0 +1,72 @@
+import { useEffect, useRef, useState } from 'react'
+import { api, streamChat } from '../api'
+
+export default function Playground() {
+  const [models, setModels] = useState([])
+  const [model, setModel] = useState('')
+  const [system, setSystem] = useState('You are a helpful assistant.')
+  const [temp, setTemp] = useState(0.7)
+  const [maxTokens, setMaxTokens] = useState(512)
+  const [input, setInput] = useState('')
+  const [msgs, setMsgs] = useState([])
+  const [busy, setBusy] = useState(false)
+  const [stat, setStat] = useState(null)
+  const abort = useRef(null)
+  const bottom = useRef(null)
+
+  useEffect(() => { api.models().then((d) => { setModels(d.data); setModel(d.data[0]?.id || '') }).catch(() => {}) }, [])
+  useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
+
+  const send = async () => {
+    if (!input.trim() || busy) return
+    const history = [...msgs, { role: 'user', content: input }]
+    setMsgs([...history, { role: 'assistant', content: '' }])
+    setInput('')
+    setBusy(true)
+    abort.current = new AbortController()
+    const t0 = performance.now()
+    let first = 0, n = 0
+    try {
+      const usage = await streamChat(
+        { model, temperature: +temp, max_tokens: +maxTokens, messages: [{ role: 'system', content: system }, ...history] },
+        (tok) => {
+          if (!first) first = performance.now()
+          n++
+          setMsgs((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], content: c[c.length - 1].content + tok }; return c })
+        },
+        abort.current.signal,
+      )
+      const gen = (performance.now() - first) / 1000
+      setStat({ ttft: first - t0, tps: (usage?.completion_tokens || n) / gen, usage })
+    } catch (e) {
+      if (e.name !== 'AbortError') setMsgs((m) => [...m, { role: 'assistant', content: '⚠ ' + e.message }])
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <>
+      <h2>Playground</h2>
+      <div className="row">
+        <label>model<select value={model} onChange={(e) => setModel(e.target.value)}>{models.map((m) => <option key={m.id}>{m.id}</option>)}</select></label>
+        <label>temperature<input type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(e.target.value)} style={{ width: 80 }} /></label>
+        <label>max tokens<input type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} style={{ width: 90 }} /></label>
+        <label style={{ flex: 1 }}>system prompt<input value={system} onChange={(e) => setSystem(e.target.value)} /></label>
+        <button className="primary" style={{ background: '#2a3142' }} onClick={() => { setMsgs([]); setStat(null) }}>clear</button>
+      </div>
+
+      <div className="chat">
+        {msgs.map((m, i) => <div key={i} className={`msg ${m.role}`}>{m.content || (busy ? '▍' : '')}</div>)}
+        <div ref={bottom} />
+      </div>
+
+      {stat && <p className="muted">TTFT {stat.ttft.toFixed(0)} ms · {stat.tps.toFixed(1)} tok/s · {stat.usage?.prompt_tokens} prompt / {stat.usage?.completion_tokens} completion tokens</p>}
+
+      <div className="row">
+        <textarea rows={3} value={input} placeholder="Message… (Enter to send, Shift+Enter for newline)" onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} style={{ flex: 1 }} />
+        {busy ? <button className="primary" style={{ background: 'var(--red)' }} onClick={() => abort.current?.abort()}>stop</button>
+              : <button className="primary" onClick={send} disabled={!model}>send</button>}
+      </div>
+    </>
+  )
+}
