@@ -498,6 +498,7 @@ impl Model {
             }
         }
         let profile = std::env::var("PROFILE").is_ok();
+        let layer_debug = std::env::var("LAYER_DEBUG").is_ok();
         let mut tm = [0f64; 6]; // qkv, norm+rope+store, attention, o, mlp, head
         let mut tick = std::time::Instant::now();
         let mut lap = |slot: usize, tick: &mut std::time::Instant| {
@@ -641,6 +642,13 @@ impl Model {
                 Mlp::Moe { router, experts } => self.moe_forward(router, experts, &hn, m, &mut x),
             }
             lap(4, &mut tick);
+            if layer_debug {
+                let x0 = &x[..c.hidden];
+                let norm = x0.iter().map(|v| v * v).sum::<f32>().sqrt();
+                let mx = x0.iter().fold(0f32, |a, &b| a.max(b.abs()));
+                let nan = x0.iter().filter(|v| !v.is_finite()).count();
+                eprintln!("layer {li:2} ({}) |x|={norm:10.3} max|x|={mx:9.3} nonfinite={nan}", if c.is_full(li) { "full" } else { "lin " });
+            }
         }
 
         for (sq, n) in seen.iter().enumerate() {
