@@ -65,7 +65,7 @@ impl Pool {
             let s = shared.clone();
             std::thread::spawn(move || {
                 pin_to_cpu(w);
-                worker(s, w)
+                worker(s, w, threads)
             });
         }
         Pool { shared, workers: threads, job_lock: Mutex::new(()) }
@@ -134,11 +134,11 @@ impl Pool {
     }
 }
 
-fn worker(s: Arc<Shared>, id: usize) {
+// `workers` must come from the pool: after pinning, available_parallelism() would report 1 on
+// Linux, and a wrong stride makes owner-first scheduling skip chunks (garbage output).
+fn worker(s: Arc<Shared>, id: usize, workers: usize) {
     set_ftz_daz();
     let mut seen = 0u64;
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let workers = std::env::var("THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(workers);
     loop {
         let (f, chunks, static_) = {
             let mut st = s.state.lock().unwrap();
@@ -212,6 +212,27 @@ pub fn pin_to_cpu(cpu: usize) {
             let ncpu = libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize;
             libc::CPU_SET(cpu % ncpu.max(1), &mut set);
             libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn owner_first_covers_every_chunk_once() {
+        let pool = Pool::new(6);
+        for &chunks in &[1usize, 5, 6, 7, 64, 1000] {
+            let hits: Vec<AtomicU32> = (0..chunks).map(|_| AtomicU32::new(0)).collect();
+            pool.run_impl(chunks, &|c| { hits[c].fetch_add(1, Ordering::SeqCst); }, true);
+            for (c, h) in hits.iter().enumerate() {
+                assert_eq!(h.load(Ordering::SeqCst), 1, "chunk {c} of {chunks} hit {} times", h.load(Ordering::SeqCst));
+            }
+            let hits: Vec<AtomicU32> = (0..chunks).map(|_| AtomicU32::new(0)).collect();
+            pool.run_impl(chunks, &|c| { hits[c].fetch_add(1, Ordering::SeqCst); }, false);
+            assert!(hits.iter().all(|h| h.load(Ordering::SeqCst) == 1));
         }
     }
 }
