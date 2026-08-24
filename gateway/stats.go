@@ -159,6 +159,16 @@ func (s *Store) Summarize(window time.Duration) Summary {
 
 // SummarizeRange rolls up requests in [from, to): today, last 7 days, or any custom period.
 func (s *Store) SummarizeRange(from, to time.Time, label string) Summary {
+	return s.summarizeRange(from, to, label, "")
+}
+
+// SummarizeUser is the same roll-up scoped to one customer's own traffic. EarningsUSD is
+// what they were charged, so the customer dashboard reads it as spend.
+func (s *Store) SummarizeUser(userID string, from, to time.Time, label string) Summary {
+	return s.summarizeRange(from, to, label, userID)
+}
+
+func (s *Store) summarizeRange(from, to time.Time, label, userID string) Summary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	window := to.Sub(from)
@@ -172,6 +182,9 @@ func (s *Store) SummarizeRange(from, to time.Time, label string) Summary {
 	sum.ByError = map[string]int{}
 	for _, r := range s.Records {
 		if r.At.Before(since) || !r.At.Before(to) {
+			continue
+		}
+		if userID != "" && r.UserID != userID {
 			continue
 		}
 		if r.Canceled {

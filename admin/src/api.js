@@ -36,6 +36,7 @@ export const api = {
   logout: () => call('/auth/logout', { method: 'POST' }),
   me: () => call('/auth/me'),
   myKeys: () => call('/account/keys'),
+  usage: (q = 'period=7d') => call(`/account/usage?${q}`),
   createMyKey: (name) => call('/account/keys', { method: 'POST', body: { name } }),
   revokeMyKey: (prefix) => call(`/account/keys?prefix=${encodeURIComponent(prefix)}`, { method: 'DELETE' }),
   keys: () => call('/admin/keys', { token: cfg.adminToken }),
@@ -50,10 +51,16 @@ export const api = {
 }
 
 // Streams a chat completion; onToken gets each delta, resolves with final usage.
-export async function streamChat(req, onToken, onReasoning, signal) {
+// `session: true` authenticates with the login cookie instead of a bearer key. The customer
+// playground has to work this way: raw API keys are shown exactly once and never stored, so the
+// browser has no key to send, and billing still lands on the signed-in account.
+export async function streamChat(req, onToken, onReasoning, signal, { session = false } = {}) {
   const res = await fetch(cfg.base + '/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    headers: session
+      ? { 'Content-Type': 'application/json' }
+      : { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    credentials: session ? 'include' : 'same-origin',
     body: JSON.stringify({ ...req, stream: true }),
     signal,
   })

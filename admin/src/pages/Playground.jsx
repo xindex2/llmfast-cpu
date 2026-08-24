@@ -3,7 +3,7 @@ import { api, streamChat } from '../api'
 import Markdown from '../md'
 import { Send, Stop, Trash } from '../icons'
 
-export default function Playground() {
+export default function Playground({ session = false }) {
   const [models, setModels] = useState([])
   const [model, setModel] = useState('')
   const [system, setSystem] = useState('You are a helpful assistant.')
@@ -41,6 +41,7 @@ export default function Playground() {
           setMsgs((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], reasoning: (c[c.length - 1].reasoning || '') + think }; return c })
         },
         abort.current.signal,
+        { session },
       )
       const gen = (performance.now() - first) / 1000
       setStat({ ttft: first - t0, tps: (usage?.completion_tokens || n) / gen, usage })

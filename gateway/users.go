@@ -361,3 +361,16 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 var _ = sync.Mutex{}
+
+// keyPrefix is the only form of an API key we are willing to persist. Records land in
+// stats.json and are echoed back to dashboards; a full key there would be a credential
+// sitting in plaintext on disk for the lifetime of the request log.
+func keyPrefix(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if len(raw) <= 10 {
+		return raw
+	}
+	return raw[:10] + "…"
+}

@@ -1,3 +1,3 @@
-module forge/gateway
+module llmfast/gateway
 
 go 1.24

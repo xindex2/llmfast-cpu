@@ -4,13 +4,18 @@
 #   llmfa.st           → the marketing site (static files from site/)
 #   llmfa.st/v1/*      → the API, so customers can use https://llmfa.st/v1 as their base URL
 #   llmfa.st/models    → the OpenRouter provider document
-#   llmfa.st/app       → the admin + customer dashboard
+#   app.llmfa.st       → the customer console (sign-in, keys, usage, playground, docs)
+#   app.llmfa.st/admin/ui → the operator console, behind the admin token
 #   api.llmfa.st       → the same API on its own hostname (what OpenRouter is pointed at)
+#
+# The console gets its own hostname rather than a path on llmfa.st. It is a single-page app
+# that loads /assets/* from the root, so hosting it under a path would mean rewriting asset
+# URLs at the proxy — a subdomain keeps the origin, and therefore the session cookie, simple.
 
 llmfa.st, www.llmfa.st {
 	encode zstd gzip
 
-	@api path /v1/* /models /auth/* /account/* /admin/*
+	@api path /v1/* /models
 	handle @api {
 		reverse_proxy localhost:8080 {
 			flush_interval -1
@@ -20,17 +25,24 @@ llmfa.st, www.llmfa.st {
 		}
 	}
 
-	handle_path /app* {
-		reverse_proxy localhost:8080
-		header /assets/* Cache-Control "public, max-age=31536000, immutable"
-		header /admin/ui* Cache-Control "no-store"
-	}
-
 	handle {
 		root * /opt/llmfast/site
 		try_files {path} {path}.html /index.html
 		file_server
 	}
+}
+
+app.llmfa.st {
+	encode zstd gzip
+	reverse_proxy localhost:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 10m
+		}
+	}
+	# The gateway already sets these, but say it here too so a future static-file front-end
+	# cannot accidentally cache an index that points at a bundle which no longer exists.
+	header /assets/* Cache-Control "public, max-age=31536000, immutable"
 }
 
 api.llmfa.st {

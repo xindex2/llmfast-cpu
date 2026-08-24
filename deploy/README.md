@@ -31,7 +31,8 @@ DNS — both records point at the same server:
 |---|---|---|
 | A | `llmfa.st` | server IP |
 | A | `api` | server IP |
-| AAAA | same two | IPv6, if you have one |
+| A | `app` | server IP |
+| AAAA | same three | IPv6, if you have one |
 
 ```bash
 sudo apt install -y caddy
@@ -47,11 +48,27 @@ What each URL serves:
 |---|---|
 | `https://llmfa.st` | marketing site (`/opt/llmfast/site`) |
 | `https://llmfa.st/v1/chat/completions` | the API — a friendly base URL for customers |
-| `https://llmfa.st/app/admin/ui` | admin + customer dashboard |
+| `https://app.llmfa.st` | **customer console** — sign up, API keys, usage, spend, playground, docs |
+| `https://app.llmfa.st/admin/ui` | operator console — needs `ADMIN_TOKEN`, never linked from the customer console |
 | `https://api.llmfa.st` | the same API on its own host — **give OpenRouter this one**, so the backend can move hardware without touching the site |
 | `https://api.llmfa.st/models` | the OpenRouter provider document |
 
-## 3. Renaming an existing install (forge → llmfa.st)
+## 3. The two consoles
+
+The gateway serves one React bundle with two entry points:
+
+* **`/` — the customer console.** Everything a paying customer needs and nothing else: sign-in
+  and sign-up, self-serve API keys, their own usage and spend, a playground billed against their
+  credit, and copy-paste docs with the live model list and prices. It only ever shows the signed-in
+  account's own traffic — usage is filtered server-side, not in the browser.
+* **`/admin/ui` — the operator console.** Fleet-wide stats, models, engines, benchmarks, earnings
+  and user management. Every request carries `ADMIN_TOKEN`; without it the pages return 401.
+
+The customer console never links to the admin one. Keep them on the same host anyway, so the
+session cookie has a single origin — the playground authenticates with it rather than a key,
+because raw keys are shown exactly once and never stored.
+
+## 4. Renaming an existing install (forge → llmfa.st)
 
 Servers set up before the rename keep working: `./update.sh` retires the old
 `forge-gateway.service`, installs `llmfast-gateway.service` pointing at wherever the checkout
@@ -65,7 +82,7 @@ sudo systemctl stop llmfast-gateway
 sudo mv /opt/forge /opt/llmfast && cd /opt/llmfast && ./update.sh
 ```
 
-## 4. Updating
+## 5. Updating
 
 ```bash
 cd /opt/llmfast && ./update.sh           # pull, rebuild, restart gateway (engines keep serving)
@@ -75,7 +92,7 @@ cd /opt/llmfast && ./update.sh engines   # also stop engines, then press "start 
 Engine restarts are cheap after the first load: quantized weights are cached next to the
 checkpoint (`.llmfast-cache-<quant>.bin`), so a 27B starts in ~20 s instead of ~4 minutes.
 
-## 5. Day-to-day
+## 6. Day-to-day
 
 - **Models** page: paste a Hugging Face id, set prices, start/stop engines, pick quant and device.
 - **Benchmarks** page: run real load at a chosen concurrency; p50/p95 TTFT and per-stream tok/s
@@ -84,7 +101,7 @@ checkpoint (`.llmfast-cache-<quant>.bin`), so a 27B starts in ~20 s instead of ~
 - **Dashboard**: today / 7d / custom period, uptime, failures, earnings.
 - Logs: `journalctl -u llmfast-gateway -f` and `<models dir>/<model>/engine.log`.
 
-## 6. Useful settings (`/opt/llmfast/gateway.env`)
+## 7. Useful settings (`/opt/llmfast/gateway.env`)
 
 | variable | why |
 |---|---|

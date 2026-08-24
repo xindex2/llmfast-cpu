@@ -114,3 +114,42 @@ details.think > summary::-webkit-details-marker { display: none; }
 details.think > summary::before { content: '▾ '; }
 details.think:not([open]) > summary::before { content: '▸ '; }
 details.think .md-p, details.think .md-list { color: var(--muted); font-size: 13.5px; }
+
+/* ---------- customer console (app.html) ---------- */
+.app-solo { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.auth-card { width: min(400px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 28px; }
+.auth-card label { color: var(--muted); font-size: 12.5px; display: flex; flex-direction: column; gap: 5px; font-weight: 500; }
+.auth-card input { width: 100%; }
+.auth-card h2 { margin-bottom: 0; }
+
+nav .nav-foot { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.credit-pill {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin: 0 4px 6px; padding: 8px 12px; background: var(--accent-soft); border-radius: 10px;
+}
+.credit-pill strong { font-size: 15px; letter-spacing: -.02em; }
+
+.card.notice { border-color: var(--accent); background: #fbfcff; margin-bottom: 18px; }
+button.small { padding: 6px 11px; font-size: 12.5px; }
+.mono { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
+td.mono { font-size: 12.5px; }
+.keybox {
+  flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; background: #f2f0e9;
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px;
+}
+pre.code {
+  background: #f7f6f1; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.6; margin: 10px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.card + .card { margin-top: 14px; }
+
+@media (max-width: 860px) {
+  .app { grid-template-columns: 1fr; }
+  nav { border-right: 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; padding: 14px; }
+  nav .brand { margin: 0 12px 0 4px; }
+  nav button { width: auto; }
+  nav .nav-foot { margin: 0; padding: 0; border: 0; display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .credit-pill { margin: 0; }
+  main { padding: 22px 16px; }
+}

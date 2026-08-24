@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -151,6 +152,22 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	key := bearer(r)
 	userID, ok, why := s.store.AuthKey(key)
+	// The signed-in playground has no raw key to send: keys are only ever shown once, so the
+	// browser cannot store one. Fall back to the session cookie, which is HttpOnly+SameSite=Lax,
+	// so a cross-site POST cannot spend someone's credit on their behalf.
+	if !ok && key == "" {
+		if u := s.currentUser(r); u != nil {
+			if u.Disabled {
+				apiError(w, 403, "account disabled")
+				return
+			}
+			if u.CreditUSD <= 0 {
+				writeJSON(w, 402, map[string]any{"error": map[string]any{"message": "insufficient credit, top up to continue", "type": "insufficient_quota"}})
+				return
+			}
+			userID, ok, key = u.ID, true, "session"
+		}
+	}
 	if !ok {
 		if strings.HasPrefix(why, "insufficient credit") {
 			// 402 is a payment problem, not a provider outage
@@ -190,7 +207,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	id := newID("chatcmpl")
 	start := time.Now()
 	var firstTok time.Time
-	rec := RequestRecord{ID: id, At: start, Key: key, UserID: userID, Model: req.Model, Engine: eng.Name(), StatusCode: 200}
+	rec := RequestRecord{ID: id, At: start, Key: keyPrefix(key), UserID: userID, Model: req.Model, Engine: eng.Name(), StatusCode: 200}
 	var full, reasoning strings.Builder
 
 	if req.Stream {
@@ -333,7 +350,33 @@ func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+	from, to, label := periodRange(r.URL.Query())
+	sum := s.store.SummarizeRange(from, to, label)
+	writeJSON(w, 200, map[string]any{
+		"summary":  sum,
+		"inflight": s.inflight.Load(),
+		"engines":  s.engineStatus(),
+		"models":   models,
+	})
+}
+
+// handleAccountUsage is handleStats scoped to the signed-in customer: same shape, so the
+// customer dashboard and the admin dashboard can share rendering code.
+func (s *Server) handleAccountUsage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		apiError(w, 401, "not signed in")
+		return
+	}
+	from, to, label := periodRange(r.URL.Query())
+	writeJSON(w, 200, map[string]any{
+		"summary": s.store.SummarizeUser(u.ID, from, to, label),
+		"user":    u,
+	})
+}
+
+// periodRange turns ?period=today|yesterday|7d|30d|custom (or ?hours=N) into a time window.
+func periodRange(q url.Values) (time.Time, time.Time, string) {
 	now := time.Now()
 	from, to, label := now.Add(-24*time.Hour), now, "last 24h"
 	switch q.Get("period") {
@@ -359,13 +402,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			from, label = now.Add(-time.Duration(h)*time.Hour), fmt.Sprintf("last %dh", h)
 		}
 	}
-	sum := s.store.SummarizeRange(from, to, label)
-	writeJSON(w, 200, map[string]any{
-		"summary":  sum,
-		"inflight": s.inflight.Load(),
-		"engines":  s.engineStatus(),
-		"models":   models,
-	})
+	return from, to, label
 }
 
 func (s *Server) engineStatus() []map[string]any {
@@ -609,10 +646,25 @@ func envInt(k string, d int) int {
 }
 
 func cors(next http.Handler) http.Handler {
+	// Credentialed requests (the session cookie) cannot use a wildcard origin, and echoing
+	// any origin back would defeat the point. Only origins named in ALLOWED_ORIGINS get
+	// credentials; everyone else keeps the wildcard, which is enough for bearer-key clients.
+	allowed := map[string]bool{}
+	for _, o := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			allowed[o] = true
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if o := r.Header.Get("Origin"); o != "" && allowed[o] {
+			w.Header().Set("Access-Control-Allow-Origin", o)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
 			return
@@ -646,7 +698,8 @@ func main() {
 	s.registry.Adopt()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+	serveUI := false
+	mux.HandleFunc("GET /api", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"service": "llmfast-gateway", "endpoints": []string{"GET /health", "GET /models (OpenRouter provider doc)", "GET /v1/models", "POST /v1/chat/completions", "GET /admin/stats", "/admin/keys", "/admin/benchmarks"}, "admin_ui": envOr("ADMIN_URL", "http://localhost:5173")})
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
@@ -665,6 +718,7 @@ func main() {
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /auth/me", s.handleMe)
 	mux.HandleFunc("/account/keys", s.handleUserKeys)
+	mux.HandleFunc("GET /account/usage", s.handleAccountUsage)
 	mux.HandleFunc("POST /admin/models/{id}/{action}", s.adminAuth(s.handleModelAction))
 
 	// Serve the built admin UI (admin/dist) at / when ADMIN_DIR is set, so one process = API + admin.
@@ -677,14 +731,28 @@ func main() {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			fs.ServeHTTP(w, r)
 		}))
-		index := func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Cache-Control", "no-store, must-revalidate")
-			w.Header().Set("Pragma", "no-cache")
-			http.ServeFile(w, r, dir+"/index.html")
+		page := func(file string) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store, must-revalidate")
+				w.Header().Set("Pragma", "no-cache")
+				http.ServeFile(w, r, dir+"/"+file)
+			}
 		}
-		mux.HandleFunc("GET /admin/ui", index)
-		mux.HandleFunc("GET /admin/ui/", index) // trailing slash and deep links
-		log.Printf("admin UI at /admin/ui from %s", dir)
+		admin, app := page("index.html"), page("app.html")
+		mux.HandleFunc("GET /admin/ui", admin)
+		mux.HandleFunc("GET /admin/ui/", admin) // trailing slash and deep links
+		// The customer console owns /. It routes on the hash, so one file covers every page.
+		mux.HandleFunc("GET /{$}", app)
+		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+		serveUI = true
+		log.Printf("customer console at /, admin UI at /admin/ui, from %s", dir)
+	}
+
+	if !serveUI {
+		// No built UI on disk (API-only deploy): / stays the service document.
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/api", http.StatusTemporaryRedirect)
+		})
 	}
 
 	handler := cors(mux)
