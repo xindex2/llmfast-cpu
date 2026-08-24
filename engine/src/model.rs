@@ -7,6 +7,7 @@
 
 use crate::kernels::*;
 use crate::safetensors::SafeTensors;
+use std::collections::HashMap;
 
 /// A linear layer's weights in whichever format we're running.
 pub enum Weight {
@@ -24,6 +25,49 @@ impl Weight {
             "q8" => Weight::Q8(QMat::from_bf16(&w, n, k)),
             "q4" => Weight::Q4(Q4Mat::from_bf16(&w, n, k)),
             _ => Weight::Bf16 { w, n, k },
+        }
+    }
+
+    /// (kind, n, k, payload bytes) for the on-disk quantized cache.
+    fn to_cache(&self) -> (&'static str, usize, usize, Vec<u8>) {
+        fn bytes_of<T: Copy>(v: &[T]) -> &[u8] {
+            unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+        }
+        match self {
+            Weight::Bf16 { w, n, k } => ("bf16", *n, *k, bytes_of(w).to_vec()),
+            Weight::Q8(q) => {
+                let mut b = bytes_of(&q.q).to_vec();
+                b.extend_from_slice(bytes_of(&q.scales));
+                ("q8", q.n, q.k, b)
+            }
+            Weight::Q4(q) => {
+                let mut b = bytes_of(&q.q).to_vec();
+                b.extend_from_slice(bytes_of(&q.scales));
+                ("q4", q.n, q.k, b)
+            }
+        }
+    }
+
+    fn from_cache(kind: &str, n: usize, k: usize, b: &[u8]) -> Weight {
+        fn to_vec<T: Copy>(b: &[u8]) -> Vec<T> {
+            let n = b.len() / std::mem::size_of::<T>();
+            let mut v: Vec<T> = Vec::with_capacity(n);
+            unsafe {
+                std::ptr::copy_nonoverlapping(b.as_ptr(), v.as_mut_ptr() as *mut u8, b.len());
+                v.set_len(n);
+            }
+            v
+        }
+        match kind {
+            "q8" => {
+                let (q, sc) = b.split_at(n * k);
+                Weight::Q8(QMat { n, k, q: to_vec(q), scales: to_vec(sc) })
+            }
+            "q4" => {
+                let (q, sc) = b.split_at(n * k / 2);
+                Weight::Q4(Q4Mat { n, k, q: to_vec(q), scales: to_vec(sc) })
+            }
+            _ => Weight::Bf16 { w: to_vec(b), n, k },
         }
     }
 
@@ -256,6 +300,102 @@ impl KvCache {
     }
 }
 
+
+/// Quantized weight cache: quantizing a 55 GB checkpoint takes minutes, but the result is
+/// deterministic, so write it once and reload it at disk speed on every later start.
+/// Layout: 8-byte header length, JSON header, then payloads. Invalidated by checkpoint mtime/size.
+mod wcache {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    pub fn key(dir: &str, quant: &str) -> String {
+        let mut sig = format!("v1|{quant}|");
+        let mut files: Vec<_> = std::fs::read_dir(dir).map(|d| d.flatten().collect()).unwrap_or_default();
+        files.sort_by_key(|e| e.file_name());
+        for e in files {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".safetensors") || name == "config.json" {
+                if let Ok(m) = e.metadata() {
+                    let mt = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                    sig.push_str(&format!("{name}:{}:{mt};", m.len()));
+                }
+            }
+        }
+        sig
+    }
+
+    pub fn path(dir: &str, quant: &str) -> String {
+        format!("{dir}/.forge-cache-{quant}.bin")
+    }
+
+    pub fn read(dir: &str, quant: &str) -> Option<HashMap<String, Weight>> {
+        let mut f = std::fs::File::open(path(dir, quant)).ok()?;
+        let mut len8 = [0u8; 8];
+        f.read_exact(&mut len8).ok()?;
+        let hlen = u64::from_le_bytes(len8) as usize;
+        let mut hb = vec![0u8; hlen];
+        f.read_exact(&mut hb).ok()?;
+        let h: serde_json::Value = serde_json::from_slice(&hb).ok()?;
+        if h["key"].as_str()? != key(dir, quant) {
+            eprintln!("weight cache: checkpoint changed, re-quantizing");
+            return None;
+        }
+        let data_start = 8 + hlen as u64;
+        let t0 = std::time::Instant::now();
+        let mut out = HashMap::new();
+        for (name, v) in h["tensors"].as_object()? {
+            let (kind, n, k) = (v["kind"].as_str()?, v["n"].as_u64()? as usize, v["k"].as_u64()? as usize);
+            let (off, len) = (v["off"].as_u64()?, v["len"].as_u64()? as usize);
+            let mut b = vec![0u8; len];
+            f.seek(SeekFrom::Start(data_start + off)).ok()?;
+            f.read_exact(&mut b).ok()?;
+            out.insert(name.clone(), Weight::from_cache(kind, n, k, &b));
+        }
+        eprintln!("weight cache: loaded {} tensors in {:.1}s", out.len(), t0.elapsed().as_secs_f32());
+        Some(out)
+    }
+
+    pub fn write(dir: &str, quant: &str, weights: &[(String, &Weight)]) {
+        let tmp = format!("{}.tmp", path(dir, quant));
+        let mut f = match std::fs::File::create(&tmp) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("weight cache: cannot write ({e}) — startup will re-quantize each time");
+                return;
+            }
+        };
+        let mut header = serde_json::Map::new();
+        let mut payloads = Vec::new();
+        let mut off = 0u64;
+        for (name, w) in weights {
+            let (kind, n, k, b) = w.to_cache();
+            header.insert(name.clone(), serde_json::json!({"kind": kind, "n": n, "k": k, "off": off, "len": b.len()}));
+            off += b.len() as u64;
+            payloads.push(b);
+        }
+        let h = serde_json::json!({"key": key(dir, quant), "tensors": header}).to_string();
+        let ok = (|| -> std::io::Result<()> {
+            f.write_all(&(h.len() as u64).to_le_bytes())?;
+            f.write_all(h.as_bytes())?;
+            for b in &payloads {
+                f.write_all(b)?;
+            }
+            f.sync_all()
+        })();
+        drop(f);
+        match ok {
+            Ok(()) => {
+                let _ = std::fs::rename(&tmp, path(dir, quant));
+                eprintln!("weight cache: wrote {:.1} GB — next start loads from disk", off as f64 / 1e9);
+            }
+            Err(e) => {
+                eprintln!("weight cache: write failed ({e})");
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+}
+
 impl Model {
     /// Bytes of weights streamed per token (what has to live on the device).
     pub fn weight_bytes(&self) -> usize {
@@ -299,6 +439,15 @@ impl Model {
         let config = Config::load(dir);
         let st = SafeTensors::open_dir(dir);
         let quant = quant.to_string();
+        // Quantized weights come from the cache when the checkpoint is unchanged (WCACHE=0 disables).
+        let use_cache = std::env::var("WCACHE").map_or(true, |v| v != "0");
+        let mut cached: Option<HashMap<String, Weight>> = if use_cache { wcache::read(dir, &quant) } else { None };
+        let mut wload = |name: &str, q: &str| -> Weight {
+            match cached.as_mut().and_then(|c| c.remove(name)) {
+                Some(w) => w,
+                None => Weight::load(&st, name, q),
+            }
+        };
         // qwen3_5 stores RMSNorm weights zero-centered and applies (1 + w); qwen3 applies w.
         let norm_w = |name: &str| {
             let mut v = st.f32(name);
@@ -317,10 +466,10 @@ impl Model {
             let p = format!("{}layers.{l}.", config.prefix);
             let attn = if config.is_full(l) {
                 Attn::Full {
-                    wq: Weight::load(&st, &format!("{p}self_attn.q_proj.weight"), &quant),
-                    wk: Weight::load(&st, &format!("{p}self_attn.k_proj.weight"), &quant),
-                    wv: Weight::load(&st, &format!("{p}self_attn.v_proj.weight"), &quant),
-                    wo: Weight::load(&st, &format!("{p}self_attn.o_proj.weight"), &quant),
+                    wq: wload(&format!("{p}self_attn.q_proj.weight"), &quant),
+                    wk: wload(&format!("{p}self_attn.k_proj.weight"), &quant),
+                    wv: wload(&format!("{p}self_attn.v_proj.weight"), &quant),
+                    wo: wload(&format!("{p}self_attn.o_proj.weight"), &quant),
                     q_norm: norm_w(&format!("{p}self_attn.q_norm.weight")),
                     k_norm: norm_w(&format!("{p}self_attn.k_norm.weight")),
                     gate: config.attn_gate,
@@ -332,16 +481,16 @@ impl Model {
                 let lq: &str = lq_env.as_deref().unwrap_or(if quant == "q4" { "q8" } else { quant.as_str() });
                 let _ = &lq_env;
                 Attn::Lin {
-                    w_qkv: Weight::load(&st, &format!("{p}linear_attn.in_proj_qkv.weight"), lq),
-                    w_z: Weight::load(&st, &format!("{p}linear_attn.in_proj_z.weight"), lq),
+                    w_qkv: wload(&format!("{p}linear_attn.in_proj_qkv.weight"), lq),
+                    w_z: wload(&format!("{p}linear_attn.in_proj_z.weight"), lq),
                     // beta/decay projections are tiny and numerically sensitive: keep full precision
-                    w_b: Weight::load(&st, &format!("{p}linear_attn.in_proj_b.weight"), "bf16"),
-                    w_a: Weight::load(&st, &format!("{p}linear_attn.in_proj_a.weight"), "bf16"),
+                    w_b: wload(&format!("{p}linear_attn.in_proj_b.weight"), "bf16"),
+                    w_a: wload(&format!("{p}linear_attn.in_proj_a.weight"), "bf16"),
                     conv_w: st.f32(&format!("{p}linear_attn.conv1d.weight")),
                     dt_bias: st.f32(&format!("{p}linear_attn.dt_bias")),
                     a_log: st.f32(&format!("{p}linear_attn.A_log")),
                     norm_w: st.f32(&format!("{p}linear_attn.norm.weight")),
-                    w_out: Weight::load(&st, &format!("{p}linear_attn.out_proj.weight"), lq),
+                    w_out: wload(&format!("{p}linear_attn.out_proj.weight"), lq),
                 }
             };
             layers.push(Layer {
@@ -350,9 +499,9 @@ impl Model {
                 ln2: norm_w(&format!("{p}post_attention_layernorm.weight")),
                 mlp: if st.has(&format!("{p}mlp.gate.weight")) {
                     let experts = (0..config.num_experts).map(|e| Expert {
-                        w_gate: Weight::load(&st, &format!("{p}mlp.experts.{e}.gate_proj.weight"), &quant),
-                        w_up: Weight::load(&st, &format!("{p}mlp.experts.{e}.up_proj.weight"), &quant),
-                        w_down: Weight::load(&st, &format!("{p}mlp.experts.{e}.down_proj.weight"), &quant),
+                        w_gate: wload(&format!("{p}mlp.experts.{e}.gate_proj.weight"), &quant),
+                        w_up: wload(&format!("{p}mlp.experts.{e}.up_proj.weight"), &quant),
+                        w_down: wload(&format!("{p}mlp.experts.{e}.down_proj.weight"), &quant),
                     }).collect();
                     if l == 0 {
                         eprintln!("MoE: {} experts, top-{} per token, expert width {}", config.num_experts, config.experts_per_tok, config.moe_intermediate);
@@ -360,9 +509,9 @@ impl Model {
                     Mlp::Moe { router: st.f32(&format!("{p}mlp.gate.weight")), experts }
                 } else {
                     Mlp::Dense(Expert {
-                        w_gate: Weight::load(&st, &format!("{p}mlp.gate_proj.weight"), &quant),
-                        w_up: Weight::load(&st, &format!("{p}mlp.up_proj.weight"), &quant),
-                        w_down: Weight::load(&st, &format!("{p}mlp.down_proj.weight"), &quant),
+                        w_gate: wload(&format!("{p}mlp.gate_proj.weight"), &quant),
+                        w_up: wload(&format!("{p}mlp.up_proj.weight"), &quant),
+                        w_down: wload(&format!("{p}mlp.down_proj.weight"), &quant),
                     })
                 },
             });
@@ -404,6 +553,44 @@ impl Model {
                     active += b * m.config.experts_per_tok;
                 }
             }
+        }
+        if use_cache && !std::path::Path::new(&wcache::path(dir, &quant)).exists() {
+            let mut ws: Vec<(String, &Weight)> = Vec::new();
+            for (li, l) in m.layers.iter().enumerate() {
+                let p = format!("{}layers.{li}.", m.config.prefix);
+                match &l.attn {
+                    Attn::Full { wq, wk, wv, wo, .. } => {
+                        ws.push((format!("{p}self_attn.q_proj.weight"), wq));
+                        ws.push((format!("{p}self_attn.k_proj.weight"), wk));
+                        ws.push((format!("{p}self_attn.v_proj.weight"), wv));
+                        ws.push((format!("{p}self_attn.o_proj.weight"), wo));
+                    }
+                    Attn::Lin { w_qkv, w_z, w_b, w_a, w_out, .. } => {
+                        ws.push((format!("{p}linear_attn.in_proj_qkv.weight"), w_qkv));
+                        ws.push((format!("{p}linear_attn.in_proj_z.weight"), w_z));
+                        ws.push((format!("{p}linear_attn.in_proj_b.weight"), w_b));
+                        ws.push((format!("{p}linear_attn.in_proj_a.weight"), w_a));
+                        ws.push((format!("{p}linear_attn.out_proj.weight"), w_out));
+                    }
+                }
+                match &l.mlp {
+                    Mlp::Dense(e) => {
+                        ws.push((format!("{p}mlp.gate_proj.weight"), &e.w_gate));
+                        ws.push((format!("{p}mlp.up_proj.weight"), &e.w_up));
+                        ws.push((format!("{p}mlp.down_proj.weight"), &e.w_down));
+                    }
+                    Mlp::Moe { experts, .. } => {
+                        for (ei, e) in experts.iter().enumerate() {
+                            ws.push((format!("{p}mlp.experts.{ei}.gate_proj.weight"), &e.w_gate));
+                            ws.push((format!("{p}mlp.experts.{ei}.up_proj.weight"), &e.w_up));
+                            ws.push((format!("{p}mlp.experts.{ei}.down_proj.weight"), &e.w_down));
+                        }
+                    }
+                }
+            }
+            let head = if st.has("lm_head.weight") { "lm_head.weight".to_string() } else { format!("{}embed_tokens.weight", m.config.prefix) };
+            ws.push((head, &m.lm_head));
+            wcache::write(dir, &quant, &ws);
         }
         eprintln!("loaded {} layers, {:.2}B params, {:.2} GB in RAM, {:.2} GB streamed per token ({quant}) in {:.1}s",
             m.config.layers, params as f64 / 1e9, bytes as f64 / 1e9, active as f64 / 1e9, t0.elapsed().as_secs_f32());

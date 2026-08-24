@@ -126,13 +126,10 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n");
     }
     let chunk = |content: &str, finish: Option<&str>, usage: Option<Value>| {
-        let mut c = json!({"id": id, "object": "chat.completion.chunk", "model": model_name,
-            "choices": [{"index": 0, "delta": if content.is_empty() { json!({}) } else { json!({"content": content}) }, "finish_reason": finish}]});
-        if let Some(u) = usage {
-            c["usage"] = u;
-        }
-        c
+        chunk_delta(&id, &model_name, if content.is_empty() { json!({}) } else { json!({"content": content}) }, finish, usage)
     };
+    let rchunk = |reasoning: &str| chunk_delta(&id, &model_name, json!({"reasoning": reasoning}), None, None);
+
 
     // ---- hand the request to the batching scheduler and stream its events ----
     let t0 = Instant::now();
@@ -147,6 +144,12 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
         stop_ids: vec![tk.im_end, tk.eos],
         tx,
     });
+    // Qwen3.5 always-thinking models begin generation inside <think>; everything up to the
+    // closing tag is reasoning, not answer content (OpenAI/OpenRouter keep them separate).
+    let thinking_model = engine.model.config().lin.is_some();
+    let mut in_think = thinking_model;
+    let mut reasoning = String::new();
+    let mut reasoning_tokens = 0usize;
     let mut prefill_s = 0.0f32;
     let mut cached = 0usize;
     let mut t_first: Option<Instant> = None;
@@ -185,6 +188,29 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
                             break;
                         }
                     }
+                    if in_think {
+                        // the closing tag may arrive split across tokens; buffer on `reasoning`
+                        reasoning.push_str(&text);
+                        reasoning_tokens += 1;
+                        if let Some(i) = reasoning.find("</think>") {
+                            let after = reasoning[i + "</think>".len()..].to_string();
+                            reasoning.truncate(i);
+                            in_think = false;
+                            if streaming && !text.is_empty() {
+                                write_sse(stream, &rchunk(text.trim_end()));
+                            }
+                            text = after.trim_start().to_string();
+                            if text.is_empty() {
+                                continue;
+                            }
+                        } else {
+                            if streaming && !write_sse(stream, &rchunk(&text)) {
+                                eprintln!("[{id}] client disconnected");
+                                return;
+                            }
+                            continue;
+                        }
+                    }
                     full.push_str(&text);
                     if hit_stop {
                         finish = "stop";
@@ -216,14 +242,28 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
     );
 
     let usage = json!({"prompt_tokens": prompt_ids.len(), "completion_tokens": out_ids.len(), "total_tokens": prompt_ids.len() + out_ids.len(),
+        "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "cached_tokens": cached, "prefill_tok_per_sec": (prompt_ids.len() - cached) as f32 / prefill_s.max(1e-6), "decode_tok_per_sec": out_ids.len() as f32 / decode_s.max(1e-6)});
     if streaming {
         write_sse(stream, &chunk("", Some(finish), Some(usage)));
         let _ = write!(stream, "{:x}\r\ndata: [DONE]\n\n\r\n0\r\n\r\n", "data: [DONE]\n\n".len());
     } else {
+        let mut msg = json!({"role": "assistant", "content": full});
+        if !reasoning.trim().is_empty() {
+            msg["reasoning"] = json!(reasoning.trim());
+        }
         respond_json(stream, 200, &json!({"id": id, "object": "chat.completion", "model": model_name,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": full}, "finish_reason": finish}], "usage": usage}));
+            "choices": [{"index": 0, "message": msg, "finish_reason": finish}], "usage": usage}));
     }
+}
+
+fn chunk_delta(id: &str, model: &str, delta: Value, finish: Option<&str>, usage: Option<Value>) -> Value {
+    let mut c = json!({"id": id, "object": "chat.completion.chunk", "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]});
+    if let Some(u) = usage {
+        c["usage"] = u;
+    }
+    c
 }
 
 fn write_sse(stream: &mut TcpStream, v: &Value) -> bool {

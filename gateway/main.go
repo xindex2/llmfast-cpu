@@ -183,7 +183,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var firstTok time.Time
 	rec := RequestRecord{ID: id, At: start, Key: key, Model: req.Model, Engine: eng.Name()}
-	var full strings.Builder
+	var full, reasoning strings.Builder
 
 	if req.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -228,6 +228,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			send(ChatChunk{ID: id, Object: "chat.completion.chunk", Created: start.Unix(), Model: req.Model,
 				Choices: []ChunkChoice{{Delta: Delta{Content: tok}}}})
 			mu.Unlock()
+		}, func(text string) {
+			if firstTok.IsZero() {
+				firstTok = time.Now() // reasoning counts as the first token for TTFT
+			}
+			reasoning.WriteString(text)
+			mu.Lock()
+			send(ChatChunk{ID: id, Object: "chat.completion.chunk", Created: start.Unix(), Model: req.Model,
+				Choices: []ChunkChoice{{Delta: Delta{Reasoning: text}}}})
+			mu.Unlock()
 		})
 		close(stopKA)
 		mu.Lock()
@@ -252,6 +261,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			firstTok = time.Now()
 		}
 		full.WriteString(tok)
+	}, func(text string) {
+		if firstTok.IsZero() {
+			firstTok = time.Now()
+		}
+		reasoning.WriteString(text)
 	})
 	s.finish(&rec, m, usage, start, firstTok, gerr)
 	if gerr != nil {
@@ -260,7 +274,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	finalizeUsage(&usage)
 	writeJSON(w, 200, ChatResponse{ID: id, Object: "chat.completion", Created: start.Unix(), Model: req.Model,
-		Choices: []Choice{{Message: Message{Role: "assistant", Content: full.String()}, FinishReason: "stop"}},
+		Choices: []Choice{{Message: Message{Role: "assistant", Content: full.String(), Reasoning: reasoning.String()}, FinishReason: "stop"}},
 		Usage:   usage})
 }
 
@@ -399,6 +413,10 @@ func (s *Server) runBenchmark(ctx context.Context, eng Engine, model string, con
 			t0 := time.Now()
 			var first time.Time
 			u, err := eng.Generate(ctx, req, func(string) {
+				if first.IsZero() {
+					first = time.Now()
+				}
+			}, func(string) {
 				if first.IsZero() {
 					first = time.Now()
 				}

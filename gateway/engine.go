@@ -17,7 +17,7 @@ type Engine interface {
 	Model() string // model id this engine serves ("" = unknown/any)
 	// Generate streams tokens for a request. It must call emit for every token and return
 	// prompt/completion token counts. Cancelling ctx aborts generation.
-	Generate(ctx context.Context, req *ChatRequest, emit func(token string)) (Usage, error)
+	Generate(ctx context.Context, req *ChatRequest, emit func(token string), emitReasoning func(text string)) (Usage, error)
 	Healthy() bool
 }
 
@@ -64,7 +64,7 @@ func (h *HTTPEngine) Healthy() bool {
 	return resp.StatusCode < 500
 }
 
-func (h *HTTPEngine) Generate(ctx context.Context, req *ChatRequest, emit func(string)) (Usage, error) {
+func (h *HTTPEngine) Generate(ctx context.Context, req *ChatRequest, emit func(string), emitReasoning func(string)) (Usage, error) {
 	upstream := *req
 	upstream.Stream = true
 	upstream.StreamOptions = &StreamOptions{IncludeUsage: true}
@@ -103,6 +103,9 @@ func (h *HTTPEngine) Generate(ctx context.Context, req *ChatRequest, emit func(s
 			usage = *chunk.Usage
 		}
 		for _, ch := range chunk.Choices {
+			if ch.Delta.Reasoning != "" {
+				emitReasoning(ch.Delta.Reasoning)
+			}
 			if ch.Delta.Content != "" {
 				completion++
 				emit(ch.Delta.Content)

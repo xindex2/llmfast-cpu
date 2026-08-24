@@ -5,8 +5,9 @@ import "encoding/json"
 // OpenAI-compatible wire types. OpenRouter speaks exactly this shape to providers.
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 type StreamOptions struct {
@@ -28,17 +29,23 @@ type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
 }
 
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
 type Usage struct {
-	PromptTokens        int                  `json:"prompt_tokens"`
-	CompletionTokens    int                  `json:"completion_tokens"`
-	TotalTokens         int                  `json:"total_tokens"`
-	CachedTokens        int                  `json:"cached_tokens,omitempty"` // engine reports this flat
-	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	CachedTokens            int                      `json:"cached_tokens,omitempty"` // engine reports this flat
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 type Delta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 type ChunkChoice struct {
