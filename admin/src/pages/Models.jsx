@@ -66,12 +66,12 @@ function ModelCard({ m, busy, action, save, models }) {
             {m.status !== 'downloading' && m.total_bytes > 0 && <span className="muted"> · {gb(m.total_bytes)} on disk · {m.dir}</span>}
             {m.error && <span className="bad"> · {m.error}</span>}
           </div>
-          {m.status === 'downloading' && <div style={{ height: 6, background: '#1c2333', borderRadius: 3, marginTop: 6 }}><div style={{ height: 6, width: `${m.progress * 100}%`, background: 'var(--accent)', borderRadius: 3 }} /></div>}
+          {m.status === 'downloading' && <div style={{ height: 6, background: '#eceae4', borderRadius: 3, marginTop: 6 }}><div style={{ height: 6, width: `${m.progress * 100}%`, background: 'var(--accent)', borderRadius: 3 }} /></div>}
         </div>
         {m.status === 'ready' && <button className="primary" onClick={() => action(m.id, 'start')} disabled={!!busy}>start engine</button>}
-        {(m.status === 'running' || m.status === 'starting') && <button className="primary" style={{ background: 'var(--red)' }} onClick={() => action(m.id, 'stop')} disabled={!!busy}>stop</button>}
+        {(m.status === 'running' || m.status === 'starting') && <button className="danger" onClick={() => action(m.id, 'stop')} disabled={!!busy}>stop</button>}
         {m.status === 'error' && <button className="primary" onClick={() => action(m.id, 'retry')} disabled={!!busy}>retry download</button>}
-        <button className="primary" style={{ background: '#2a3142' }} onClick={() => { if (confirm(`Remove ${m.id}? (files are kept)`)) action(m.id, 'delete') }} disabled={!!busy}>remove</button>
+        <button className="ghost" onClick={() => { if (confirm(`Remove ${m.id}? (files are kept)`)) action(m.id, 'delete') }} disabled={!!busy}>remove</button>
       </div>
       <div className="row" style={{ marginBottom: 0 }}>
         <label>input $/M<input type="number" step="0.001" value={e.prompt_price_per_m} onChange={set('prompt_price_per_m')} style={{ width: 90 }} /></label>

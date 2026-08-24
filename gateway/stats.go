@@ -22,6 +22,8 @@ type RequestRecord struct {
 	DurationMs       float64   `json:"duration_ms"` // whole request
 	TokPerSec        float64   `json:"tok_per_sec"` // completion tokens / generation time
 	EarningsUSD      float64   `json:"earnings_usd"`
+	UserID           string    `json:"user_id,omitempty"`
+	StatusCode       int       `json:"status_code"`
 	Error            string    `json:"error,omitempty"`
 }
 
@@ -46,6 +48,9 @@ type Store struct {
 	Benchmarks []Benchmark     `json:"benchmarks"`
 	Keys       map[string]bool `json:"keys"`
 	Models     []ModelEntry    `json:"models"`
+	Users      []User          `json:"users"`
+	APIKeys    []APIKey        `json:"api_keys"`
+	Sessions   []Session       `json:"sessions"`
 }
 
 func LoadStore(path string) *Store {
@@ -105,6 +110,13 @@ type Summary struct {
 	AvgTTFTms        float64            `json:"avg_ttft_ms"`
 	AvgTokPerSec     float64            `json:"avg_tok_per_sec"`
 	TokensPerDayRate float64            `json:"tokens_per_day_rate"` // extrapolated from the window
+	CachedTokens     int                `json:"cached_tokens"`
+	ReasoningTokens  int                `json:"reasoning_tokens"`
+	UptimePct        float64            `json:"uptime_pct"` // successes / (successes + server errors)
+	P50TTFTms        float64            `json:"p50_ttft_ms"`
+	P95TTFTms        float64            `json:"p95_ttft_ms"`
+	Users            int                `json:"users"`
+	ByError          map[string]int     `json:"by_error"`
 	ByModel          map[string]int     `json:"tokens_by_model"`
 	ByKey            map[string]float64 `json:"earnings_by_key"`
 	Hourly           []HourBucket       `json:"hourly"`
@@ -118,22 +130,50 @@ type HourBucket struct {
 	Earnings float64 `json:"earnings_usd"`
 }
 
-func (s *Store) Summarize(window time.Duration) Summary {
+// UserSummary is the customer-facing usage roll-up.
+func (s *Store) UserSummary(userID string, window time.Duration) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
-	since := now.Add(-window)
-	sum := Summary{Window: window.String(), ByModel: map[string]int{}, ByKey: map[string]float64{}, Hourly: []HourBucket{}, Recent: []RequestRecord{}}
+	since := time.Now().Add(-window)
+	var reqs, prompt, completion int
+	var spent float64
+	for _, r := range s.Records {
+		if r.UserID != userID || r.At.Before(since) {
+			continue
+		}
+		reqs++
+		prompt += r.PromptTokens
+		completion += r.CompletionTokens
+		spent += r.EarningsUSD
+	}
+	return map[string]any{"requests": reqs, "prompt_tokens": prompt, "completion_tokens": completion, "spent_usd": spent}
+}
+
+func (s *Store) Summarize(window time.Duration) Summary {
+	return s.SummarizeRange(time.Now().Add(-window), time.Now(), window.String())
+}
+
+// SummarizeRange rolls up requests in [from, to): today, last 7 days, or any custom period.
+func (s *Store) SummarizeRange(from, to time.Time, label string) Summary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window := to.Sub(from)
+	since := from
+	sum := Summary{Window: label, ByModel: map[string]int{}, ByKey: map[string]float64{}, Hourly: []HourBucket{}, Recent: []RequestRecord{}}
 	buckets := map[string]*HourBucket{}
 	var ttft, tps float64
 	ok := 0
+	var ttfts []float64
+	users := map[string]bool{}
+	sum.ByError = map[string]int{}
 	for _, r := range s.Records {
-		if r.At.Before(since) {
+		if r.At.Before(since) || !r.At.Before(to) {
 			continue
 		}
 		sum.Requests++
 		if r.Error != "" {
 			sum.Errors++
+			sum.ByError[r.Error]++
 			continue
 		}
 		ok++
@@ -144,6 +184,11 @@ func (s *Store) Summarize(window time.Duration) Summary {
 		tps += r.TokPerSec
 		sum.ByModel[r.Model] += r.PromptTokens + r.CompletionTokens
 		sum.ByKey[r.Key] += r.EarningsUSD
+		sum.CachedTokens += r.CachedTokens
+		ttfts = append(ttfts, r.TTFTms)
+		if r.UserID != "" {
+			users[r.UserID] = true
+		}
 		h := r.At.Truncate(time.Hour).Format("2006-01-02T15:00")
 		b := buckets[h]
 		if b == nil {
@@ -159,7 +204,18 @@ func (s *Store) Summarize(window time.Duration) Summary {
 		sum.AvgTokPerSec = tps / float64(ok)
 	}
 	total := float64(sum.PromptTokens + sum.CompletionTokens)
-	sum.TokensPerDayRate = total / window.Hours() * 24
+	if window.Hours() > 0 {
+		sum.TokensPerDayRate = total / window.Hours() * 24
+	}
+	sum.Users = len(users)
+	if sum.Requests > 0 {
+		sum.UptimePct = float64(sum.Requests-sum.Errors) / float64(sum.Requests) * 100
+	}
+	if len(ttfts) > 0 {
+		sort.Float64s(ttfts)
+		sum.P50TTFTms = ttfts[len(ttfts)*50/100]
+		sum.P95TTFTms = ttfts[min(len(ttfts)-1, len(ttfts)*95/100)]
+	}
 	for _, b := range buckets {
 		sum.Hourly = append(sum.Hourly, *b)
 	}

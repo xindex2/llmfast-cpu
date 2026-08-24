@@ -7,8 +7,10 @@ import Benchmarks from './pages/Benchmarks'
 import Earnings from './pages/Earnings'
 import Settings from './pages/Settings'
 import Models from './pages/Models'
+import Users from './pages/Users'
+import Account from './pages/Account'
 
-const pages = { Dashboard, Playground, Models, Benchmarks, Earnings, Settings }
+const pages = { Dashboard, Playground, Models, Benchmarks, Earnings, Users, Account, Settings }
 
 function App() {
   const [page, setPage] = useState('Dashboard')
@@ -16,7 +18,7 @@ function App() {
   return (
     <div className="app">
       <nav>
-        <h1>⚒ FORGE</h1>
+        <div className="brand"><span className="bolt">⚡</span> llmfa.st</div>
         {Object.keys(pages).map((p) => <button key={p} className={p === page ? 'active' : ''} onClick={() => setPage(p)}>{p}</button>)}
       </nav>
       <main><Page /></main>

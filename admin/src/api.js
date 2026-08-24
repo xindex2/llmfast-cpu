@@ -9,9 +9,12 @@ export const cfg = {
 }
 
 async function call(path, { method = 'GET', body, token } = {}) {
+  const headers = { 'Content-Type': 'application/json' }
+  if (token) headers.Authorization = `Bearer ${token}`
   const res = await fetch(cfg.base + path, {
     method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers,
+    credentials: 'include', // session cookie for customer endpoints
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) throw new Error((await res.json()).error?.message || res.statusText)
@@ -19,7 +22,16 @@ async function call(path, { method = 'GET', body, token } = {}) {
 }
 
 export const api = {
-  stats: (hours = 24) => call(`/admin/stats?hours=${hours}`, { token: cfg.adminToken }),
+  stats: (q = 'period=today') => call(`/admin/stats?${q}`, { token: cfg.adminToken }),
+  users: () => call('/admin/users', { token: cfg.adminToken }),
+  topup: (user_id, amount_usd) => call('/admin/topup', { method: 'POST', body: { user_id, amount_usd }, token: cfg.adminToken }),
+  signup: (email, password) => call('/auth/signup', { method: 'POST', body: { email, password } }),
+  login: (email, password) => call('/auth/login', { method: 'POST', body: { email, password } }),
+  logout: () => call('/auth/logout', { method: 'POST' }),
+  me: () => call('/auth/me'),
+  myKeys: () => call('/account/keys'),
+  createMyKey: (name) => call('/account/keys', { method: 'POST', body: { name } }),
+  revokeMyKey: (prefix) => call(`/account/keys?prefix=${encodeURIComponent(prefix)}`, { method: 'DELETE' }),
   keys: () => call('/admin/keys', { token: cfg.adminToken }),
   createKey: () => call('/admin/keys', { method: 'POST', token: cfg.adminToken }),
   benchmarks: () => call('/admin/benchmarks', { token: cfg.adminToken }),
@@ -32,7 +44,7 @@ export const api = {
 }
 
 // Streams a chat completion; onToken gets each delta, resolves with final usage.
-export async function streamChat(req, onToken, signal) {
+export async function streamChat(req, onToken, onReasoning, signal) {
   const res = await fetch(cfg.base + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
@@ -55,8 +67,9 @@ export async function streamChat(req, onToken, signal) {
       if (data === '[DONE]') return usage
       const chunk = JSON.parse(data)
       if (chunk.usage) usage = chunk.usage
-      const t = chunk.choices?.[0]?.delta?.content
-      if (t) onToken(t)
+      const d = chunk.choices?.[0]?.delta || {}
+      if (d.reasoning && onReasoning) onReasoning(d.reasoning)
+      if (d.content) onToken(d.content)
     }
   }
   return usage

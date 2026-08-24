@@ -148,8 +148,14 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	key := bearer(r)
-	if !s.store.ValidKey(key) {
-		apiError(w, 401, "invalid api key")
+	userID, ok, why := s.store.AuthKey(key)
+	if !ok {
+		if strings.HasPrefix(why, "insufficient credit") {
+			// 402 is a payment problem, not a provider outage
+			writeJSON(w, 402, map[string]any{"error": map[string]any{"message": why, "type": "insufficient_quota"}})
+			return
+		}
+		apiError(w, 401, why)
 		return
 	}
 	var req ChatRequest
@@ -182,7 +188,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	id := newID("chatcmpl")
 	start := time.Now()
 	var firstTok time.Time
-	rec := RequestRecord{ID: id, At: start, Key: key, Model: req.Model, Engine: eng.Name()}
+	rec := RequestRecord{ID: id, At: start, Key: key, UserID: userID, Model: req.Model, Engine: eng.Name(), StatusCode: 200}
 	var full, reasoning strings.Builder
 
 	if req.Stream {
@@ -293,8 +299,10 @@ func (s *Server) finish(rec *RequestRecord, m *ModelInfo, u Usage, start, first 
 	rec.EarningsUSD = float64(fresh)/1e6*m.PromptPrice + float64(u.CachedTokens)/1e6*m.CachedPrice + float64(u.CompletionTokens)/1e6*m.OutputPrice
 	if err != nil {
 		rec.Error = err.Error()
+		rec.StatusCode = 502
 	}
 	s.store.Record(*rec)
+	s.store.Charge(rec.UserID, rec.EarningsUSD)
 }
 
 // ---------- /admin ----------
@@ -310,11 +318,33 @@ func (s *Server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	window := 24 * time.Hour
-	if h, err := strconv.Atoi(r.URL.Query().Get("hours")); err == nil && h > 0 {
-		window = time.Duration(h) * time.Hour
+	q := r.URL.Query()
+	now := time.Now()
+	from, to, label := now.Add(-24*time.Hour), now, "last 24h"
+	switch q.Get("period") {
+	case "today":
+		from, label = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), "today"
+	case "yesterday":
+		end := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		from, to, label = end.AddDate(0, 0, -1), end, "yesterday"
+	case "7d":
+		from, label = now.AddDate(0, 0, -7), "last 7 days"
+	case "30d":
+		from, label = now.AddDate(0, 0, -30), "last 30 days"
+	case "custom":
+		if f, err := time.Parse(time.RFC3339, q.Get("from")); err == nil {
+			from = f
+		}
+		if t, err := time.Parse(time.RFC3339, q.Get("to")); err == nil {
+			to = t
+		}
+		label = from.Format("2006-01-02") + " → " + to.Format("2006-01-02")
+	default:
+		if h, err := strconv.Atoi(q.Get("hours")); err == nil && h > 0 {
+			from, label = now.Add(-time.Duration(h)*time.Hour), fmt.Sprintf("last %dh", h)
+		}
 	}
-	sum := s.store.Summarize(window)
+	sum := s.store.SummarizeRange(from, to, label)
 	writeJSON(w, 200, map[string]any{
 		"summary":  sum,
 		"inflight": s.inflight.Load(),
@@ -572,6 +602,14 @@ func main() {
 	mux.HandleFunc("/admin/keys", s.adminAuth(s.handleKeys))
 	mux.HandleFunc("/admin/benchmarks", s.adminAuth(s.handleBenchmarks))
 	mux.HandleFunc("/admin/models", s.adminAuth(s.handleModelsAdmin))
+	mux.HandleFunc("GET /admin/users", s.adminAuth(s.handleAdminUsers))
+	mux.HandleFunc("POST /admin/topup", s.adminAuth(s.handleTopup))
+	// customer-facing auth + self-serve keys
+	mux.HandleFunc("POST /auth/signup", s.handleSignup)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	mux.HandleFunc("GET /auth/me", s.handleMe)
+	mux.HandleFunc("/account/keys", s.handleUserKeys)
 	mux.HandleFunc("POST /admin/models/{id}/{action}", s.adminAuth(s.handleModelAction))
 
 	// Serve the built admin UI (admin/dist) at / when ADMIN_DIR is set, so one process = API + admin.

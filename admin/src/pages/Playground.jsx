@@ -34,6 +34,10 @@ export default function Playground() {
           n++
           setMsgs((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], content: c[c.length - 1].content + tok }; return c })
         },
+        (think) => {
+          if (!first) first = performance.now()
+          setMsgs((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], reasoning: (c[c.length - 1].reasoning || '') + think }; return c })
+        },
         abort.current.signal,
       )
       const gen = (performance.now() - first) / 1000
@@ -51,11 +55,14 @@ export default function Playground() {
         <label>temperature<input type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(e.target.value)} style={{ width: 80 }} /></label>
         <label>max tokens<input type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} style={{ width: 90 }} /></label>
         <label style={{ flex: 1 }}>system prompt<input value={system} onChange={(e) => setSystem(e.target.value)} /></label>
-        <button className="primary" style={{ background: '#2a3142' }} onClick={() => { setMsgs([]); setStat(null) }}>clear</button>
+        <button className="ghost" onClick={() => { setMsgs([]); setStat(null) }}>clear</button>
       </div>
 
       <div className="chat">
-        {msgs.map((m, i) => <div key={i} className={`msg ${m.role}`}>{m.content || (busy ? '▍' : '')}</div>)}
+        {msgs.map((m, i) => <div key={i} className={`msg ${m.role}`}>
+          {m.reasoning && <div className="think">{m.reasoning}</div>}
+          {m.content || (busy && !m.reasoning ? '▍' : '')}
+        </div>)}
         <div ref={bottom} />
       </div>
 
@@ -64,7 +71,7 @@ export default function Playground() {
       <div className="row">
         <textarea rows={3} value={input} placeholder="Message… (Enter to send, Shift+Enter for newline)" onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} style={{ flex: 1 }} />
-        {busy ? <button className="primary" style={{ background: 'var(--red)' }} onClick={() => abort.current?.abort()}>stop</button>
+        {busy ? <button className="danger" onClick={() => abort.current?.abort()}>stop</button>
               : <button className="primary" onClick={send} disabled={!model}>send</button>}
       </div>
     </>
