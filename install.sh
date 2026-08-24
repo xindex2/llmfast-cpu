@@ -22,7 +22,7 @@ fi
 export PATH=$PATH:/usr/local/go/bin
 
 echo "== node"
-if ! command -v node >/dev/null; then curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash - >/dev/null && $SUDO apt-get install -y -qq nodejs >/dev/null; fi
+if ! command -v node >/dev/null; then curl -fsSL https://deb.nodesource.com/setup_22.x | ${SUDO:+$SUDO -E} bash - >/dev/null && $SUDO apt-get install -y -qq nodejs >/dev/null; fi
 
 echo "== source → $DEST"
 if [ -d "$DEST/.git" ]; then git -C "$DEST" pull -q; else $SUDO mkdir -p "$DEST" && $SUDO chown "$(id -u)" "$DEST" && git clone -q "$REPO" "$DEST"; fi
