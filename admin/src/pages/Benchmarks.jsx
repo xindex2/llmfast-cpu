@@ -22,7 +22,7 @@ export default function Benchmarks() {
   return (
     <>
       <h2>Benchmarks</h2>
-      <p className="muted">Aggregate tok/s is the number that sizes the fleet: servers needed = target tok/s ÷ aggregate tok/s per server. 100M tok/day ≈ 1,160 tok/s.</p>
+      <p className="lede">Runs real requests against the live engine at the concurrency you choose. <span className="hand">Per-stream tok/s and p50 TTFT are what OpenRouter publishes for your endpoint</span> — aggregate tok/s is what sizes the fleet: servers needed = target tok/s ÷ aggregate tok/s per server. 100M tok/day ≈ 1,160 tok/s.</p>
       <div className="row">
         <label>model<select value={cfg.model} onChange={set('model')}>{models.map((m) => <option key={m.id}>{m.id}</option>)}</select></label>
         <label>concurrency<input type="number" value={cfg.concurrency} onChange={set('concurrency')} style={{ width: 80 }} /></label>
@@ -34,7 +34,7 @@ export default function Benchmarks() {
       <div className="row"><label>server cost $/month (for the profit column)<input type="number" value={serverCost} onChange={(e) => setServerCost(+e.target.value)} style={{ width: 110 }} /></label></div>
       <div className="card">
         <table>
-          <thead><tr><th>when</th><th>model</th><th>conc</th><th>reqs</th><th>avg TTFT</th><th>per-stream tok/s</th><th>aggregate tok/s</th><th>servers for 100M/day</th><th>revenue/day at this rate</th><th>revenue/month</th><th>profit/month</th><th>errors</th></tr></thead>
+          <thead><tr><th>when</th><th>model</th><th>conc</th><th>reqs</th><th>TTFT p50 / p95</th><th>per-stream tok/s</th><th>aggregate tok/s</th><th>servers for 100M/day</th><th>revenue/day at this rate</th><th>revenue/month</th><th>profit/month</th><th>errors</th></tr></thead>
           <tbody>{list.map((b) => {
             const m = models.find((x) => x.id === b.model)
             // A server running flat out at this aggregate rate: completion tokens earn the output price;
@@ -46,7 +46,7 @@ export default function Benchmarks() {
             return (
             <tr key={b.id}>
               <td>{new Date(b.at).toLocaleString()}</td><td>{b.model}</td><td>{b.concurrency}</td><td>{b.requests}</td>
-              <td>{b.avg_ttft_ms.toFixed(0)} ms</td><td>{b.avg_tok_per_sec.toFixed(1)}</td><td><b>{b.agg_tok_per_sec.toFixed(1)}</b></td>
+              <td>{(b.p50_ttft_ms || b.avg_ttft_ms).toFixed(0)} / {(b.p95_ttft_ms || b.avg_ttft_ms).toFixed(0)} ms</td><td>{b.avg_tok_per_sec.toFixed(1)}</td><td><b>{b.agg_tok_per_sec.toFixed(1)}</b></td>
               <td>{b.agg_tok_per_sec > 0 ? Math.ceil(1160 / b.agg_tok_per_sec) : '—'}</td>
               <td>{m ? '$' + revDay.toFixed(2) : <span className="muted">no price</span>}</td>
               <td>{m ? '$' + revMonth.toFixed(0) : '—'}</td>

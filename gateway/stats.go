@@ -35,6 +35,8 @@ type Benchmark struct {
 	Concurrency  int       `json:"concurrency"`
 	Requests     int       `json:"requests"`
 	AvgTTFTms    float64   `json:"avg_ttft_ms"`
+	P50TTFTms    float64   `json:"p50_ttft_ms"`
+	P95TTFTms    float64   `json:"p95_ttft_ms"`
 	AvgTokPerSec float64   `json:"avg_tok_per_sec"` // per stream
 	AggTokPerSec float64   `json:"agg_tok_per_sec"` // whole server, this is what sizes the fleet
 	Errors       int       `json:"errors"`

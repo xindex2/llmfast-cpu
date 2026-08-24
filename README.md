@@ -35,32 +35,64 @@ load-balances across N of them, stats are aggregated centrally.
 4. **Engine M3 – throughput**: ~~continuous batching~~ done; next: chunked prefill, prefix cache, paged KV. Benchmark vs llama.cpp.
 5. **Provider launch**: ~~OpenRouter `/models` document (schema 2.4), early 429s, cached-token billing, SSE keep-alives, stop sequences~~ done; next: domain + TLS, uptime monitoring, tool calling, apply.
 
-## Run
+## Run locally
 
 ```bash
-# 1. engine (our Rust inference engine) — needs a checkpoint dir with config.json, model.safetensors, tokenizer.json
+# engine (needs a checkpoint dir with config.json, model.safetensors, tokenizer.json)
 cd engine && cargo build --release
 MODEL=../models/qwen3-0.6b ./target/release/forge-engine                    # serves :9000
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine --prompt "hello"   # quick CLI test
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine --tokenize "text"  # inspect tokenization
+MODEL=../models/qwen3-0.6b ./target/release/forge-engine --prompt "hello"   # one-shot CLI
+MODEL=../models/qwen3-0.6b ./target/release/forge-engine --bench            # kernel GFLOPS/GB-s
 
-# 2. gateway — talks to one or more engines (ENGINE_URL=http://a:9000,http://b:9000)
-cd gateway && go build -o forge-gateway . && ./forge-gateway                 # :8080
+# gateway (OpenAI API + admin API + provider document)
+cd gateway && go build -o forge-gateway . && ./forge-gateway                # :8080
 
-# 3. admin UI
-cd admin && npm install && npm run dev                                       # http://localhost:5173
+# admin UI
+cd admin && npm install && npm run dev                                      # :5173
 
-# test the API
 curl -N localhost:8080/v1/chat/completions -H 'Authorization: Bearer dev-key' \
   -d '{"model":"qwen3-0.6b","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Engine env: `DEVICE=auto|cpu|gpu`, `GPU_MEM_MB`, `MAX_CONTEXT` (default 4096; GPU path caps at 2048 for now), `QUANT=q8|bf16` (default q8), `THREADS`, `THINK=1` (Qwen3 thinking mode), `MODEL_NAME`, `PROFILE=1` (per-step timing).
-Engine flags: `--prompt "..."` one-shot CLI, `--tokenize "..."`, `--bench` kernel GFLOPS/GB/s.
-Gateway env: `ENGINE_URL`, `MODELS=id:ctx:prompt$/M:completion$/M[:cached$/M],...`, `MAX_INFLIGHT` (429 above), `ADMIN_TOKEN`, `STORE`,
-provider doc: `QUANTIZATION`, `DATACENTER_COUNTRY/REGION`, `PROVIDER_SLUG`, `CAP_PROMPT_TPM`, `CAP_COMPLETION_TPM`, `CAP_RPM`, `ZDR`, `IS_READY`.
-Speculative decoding: n-gram prompt-lookup is on by default (`NGRAM=0` off, `NGRAM_N`, `NGRAM_K`); draft model: `DRAFT_MODEL=../models/qwen3-0.6b SPEC_K=4`.
-CPU tuning: `THREADS`, `FORCE_SIMD=0|1|2` (scalar / AVX / AVX2+FMA), `STATIC=0|1` (owner-first NUMA scheduling, default on Linux), `PIN=0` (disable CPU pinning on Linux).
+## Deploy on a server (llmfa.st)
+
+Full walkthrough — DNS, TLS, updates, day-to-day — in [deploy/README.md](deploy/README.md).
+Short version: **Caddy** for TLS (automatic certificates), **systemd** for supervision.
+
+```bash
+# first install on fresh Ubuntu
+curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/install.sh | bash
+sudo cp /opt/forge/deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+# every update after that
+cd /opt/forge && ./update.sh            # pull + rebuild + restart gateway
+cd /opt/forge && ./update.sh engines    # also restart the model engines
+```
+
+| URL | serves |
+|---|---|
+| `llmfa.st` | marketing site |
+| `llmfa.st/v1/chat/completions` | API (customer-facing base URL) |
+| `llmfa.st/app/admin/ui` | admin + customer dashboard |
+| `api.llmfa.st` + `/models` | API and provider document — point OpenRouter here |
+
+Engine env: `DEVICE=auto|cpu|gpu`, `GPU_MEM_MB`, `MAX_CONTEXT`, `QUANT=q8|q4|bf16`, `THREADS`,
+`NGRAM`, `DRAFT_MODEL`+`SPEC_K`, `WCACHE=0` (disable the quantized weight cache), `STATIC`, `PIN`,
+`FORCE_SIMD=0|1|2`, `PROFILE=1`, `LAYER_DEBUG=1`.
+Gateway env: `ENGINE_URL`, `MODELS`, `MAX_INFLIGHT`, `ADMIN_TOKEN`, `STORE`, `ADMIN_DIR`,
+`PROVIDER_SLUG`, `QUANTIZATION`, `DATACENTER_COUNTRY/REGION`, `CAP_PROMPT_TPM`,
+`CAP_COMPLETION_TPM`, `CAP_RPM`, `ZDR`, `IS_READY`, `HF_TOKEN`.
+
+## What the admin does
+
+- **Dashboard** — tokens, earnings, uptime, TTFT p50/p95, failures; today / yesterday / 7d / 30d / custom range.
+- **Playground** — streaming chat with live TTFT and tok/s; reasoning shown separately.
+- **Models** — add by Hugging Face id, price it, choose quant/context/device/draft model, start and stop engines.
+- **Benchmarks** — real load at a chosen concurrency: p50/p95 TTFT, per-stream and aggregate tok/s, servers needed, revenue and profit.
+- **Earnings** — unit economics: prices, OpenRouter cut, server cost, utilization → profit per month.
+- **Customers** — accounts, prepaid credit, usage, top-ups.
+- **Account** — customer sign-in, self-serve API keys, balance, quickstart.
+- **Launch** — live checklist of every OpenRouter provider requirement.
 
 ## GPU backend
 

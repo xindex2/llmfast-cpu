@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -436,6 +437,7 @@ func (s *Server) runBenchmark(ctx context.Context, eng Engine, model string, con
 	b := Benchmark{ID: newID("bench"), At: time.Now(), Engine: eng.Name(), Model: model, Concurrency: conc, Requests: n}
 	var mu sync.Mutex
 	var ttft, tps float64
+	var ttfts []float64
 	totalTok := 0
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
@@ -465,7 +467,9 @@ func (s *Server) runBenchmark(ctx context.Context, eng Engine, model string, con
 				b.LastError = err.Error()
 				return
 			}
-			ttft += float64(first.Sub(t0).Milliseconds())
+			ms := float64(first.Sub(t0).Microseconds()) / 1000
+			ttft += ms
+			ttfts = append(ttfts, ms)
 			if g := time.Since(first).Seconds(); g > 0 {
 				tps += float64(u.CompletionTokens) / g
 			}
@@ -477,6 +481,12 @@ func (s *Server) runBenchmark(ctx context.Context, eng Engine, model string, con
 	if okN > 0 {
 		b.AvgTTFTms = ttft / float64(okN)
 		b.AvgTokPerSec = tps / float64(okN)
+	}
+	if len(ttfts) > 0 {
+		// p50/p95 under the requested concurrency: what OpenRouter's latency column shows
+		sort.Float64s(ttfts)
+		b.P50TTFTms = ttfts[len(ttfts)*50/100]
+		b.P95TTFTms = ttfts[min(len(ttfts)-1, len(ttfts)*95/100)]
 	}
 	b.AggTokPerSec = float64(totalTok) / time.Since(start).Seconds()
 	return b
