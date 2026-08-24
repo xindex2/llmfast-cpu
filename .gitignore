@@ -5,3 +5,4 @@ forge-store.json
 gateway/forge-gateway
 models/
 engine/forge-engine
+.tmp/
