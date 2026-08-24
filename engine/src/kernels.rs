@@ -963,19 +963,28 @@ pub fn quantize_vec(x: &[f32]) -> Q8Vec {
     Q8Vec { q, scales }
 }
 
-/// Decode in the integer domain. The motivation is real -- without AVX2 there is no FMA and
-/// every int8 weight must be widened to float through the single shuffle port, which is what
-/// leaves the AVX1 kernel at ~62% of the machine's memory-read ceiling -- but whether it
-/// actually wins depends on the microarchitecture, and measuring it on a machine that is
-/// already near its ceiling says nothing about one that is not.
+/// Decode in the integer domain. On by default without AVX2, off with it -- both measured,
+/// not assumed:
 ///
-/// So: off unless asked for. `--bench` times both paths side by side; set I8_DECODE=1 only
-/// where the integer row actually beats the f32 row on that box.
+///   Xeon E5-2660v2 (AVX1, 20 threads, 75 MB matrix, ceiling 90.8 GB/s)
+///     f32 widening path   53.8 GB/s   59% of ceiling
+///     integer path        84.7 GB/s   93% of ceiling      1.57x
+///
+/// Without AVX2 there is no FMA and every int8 weight is widened to float through the single
+/// shuffle port; the integer path spends two psignb where that path spends four shuffles per
+/// eight weights, and the gap is the whole 1.57x. With AVX2 the f32 path is one FMA per
+/// multiply and measured slightly ahead, so it keeps the default there.
+///
+/// `--bench` times both paths side by side on any box; I8_DECODE=1|0 overrides either way.
 #[cfg(target_arch = "x86_64")]
 fn i8_decode() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("I8_DECODE").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| match std::env::var("I8_DECODE").ok().as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => simd_level() == 1,
+    })
 }
 
 #[cfg(not(target_arch = "x86_64"))]

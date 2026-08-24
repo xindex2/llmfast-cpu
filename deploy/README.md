@@ -112,6 +112,11 @@ and higher quality. Measure rather than assume:
 ./engine/llmfast-engine --bench | head -4
 ```
 
+On a pre-AVX2 box the engine also switches decode to an integer kernel (`I8_DECODE`, on by
+default when the log says `simd: level 1`). Measured on the Xeon E5-2660v2: 53.8 GB/s → 84.7
+GB/s, 59% → 93% of that machine's ceiling. Decode there is now memory-bound, so further kernel
+work on `q8` will not help; more memory channels would.
+
 The first line is a pure memory-read ceiling at the same footprint as the matvecs below it.
 A matvec close to the ceiling is memory-bound — only more memory channels will help. One well
 under it is limited by the kernel, not the box. Pick the quant with the lower **ms**, not the
