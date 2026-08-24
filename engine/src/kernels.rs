@@ -1087,6 +1087,34 @@ mod sse {
         total
     }
 
+    /// Same integer pipeline for q4. The nibble unpack (and, shift, subtract the bias of 8)
+    /// costs five ALU ops per 32 weights, against the ~35 the f32 path spends widening those
+    /// same nibbles to float -- and the codes are only 4 bits, so a pmaddubsw lane holds at
+    /// most 8*127*2 = 2032, nowhere near saturation.
+    ///
+    /// Layout: 16 bytes per 32-value block, byte i holding w[i] in the low nibble and w[i+16]
+    /// in the high one, which is why the two halves dot against different slices of x.
+    #[target_feature(enable = "sse4.1,ssse3")]
+    pub unsafe fn dot_q4_i8(q: &[u8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+        let ones = _mm_set1_epi16(1);
+        let mask = _mm_set1_epi8(0x0F);
+        let eight = _mm_set1_epi8(8);
+        let mut total = 0f32;
+        for (b, &sc) in wsc.iter().enumerate() {
+            let v = _mm_loadu_si128(q.as_ptr().add(b * 16) as *const __m128i);
+            let lo = _mm_sub_epi8(_mm_and_si128(v, mask), eight);
+            let hi = _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(v, 4), mask), eight);
+            let xp = xq.q.as_ptr().add(b * super::QBLOCK);
+            let x0 = _mm_loadu_si128(xp as *const __m128i);
+            let x1 = _mm_loadu_si128(xp.add(16) as *const __m128i);
+            let p0 = _mm_maddubs_epi16(_mm_sign_epi8(lo, lo), _mm_sign_epi8(x0, lo));
+            let p1 = _mm_maddubs_epi16(_mm_sign_epi8(hi, hi), _mm_sign_epi8(x1, hi));
+            let acc = _mm_add_epi32(_mm_madd_epi16(p0, ones), _mm_madd_epi16(p1, ones));
+            total += hsum_epi32(acc) as f32 * sc * xq.scales[b];
+        }
+        total
+    }
+
     #[inline]
     #[target_feature(enable = "sse4.1")]
     unsafe fn hsum_epi32(v: __m128i) -> i32 {
@@ -1248,6 +1276,9 @@ impl Q4Mat {
 }
 
 pub fn matvec_q4(w: &Q4Mat, x: &[f32], y: &mut [f32]) {
+    if i8_decode() && w.k % QBLOCK == 0 {
+        return matvec_q4_i8(w, &quantize_vec(x), y);
+    }
     let (n, k) = (w.n, w.k);
     let yp = SendPtr(y.as_mut_ptr());
     let chunks = (n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
@@ -1260,6 +1291,45 @@ pub fn matvec_q4(w: &Q4Mat, x: &[f32], y: &mut [f32]) {
             unsafe { *yp.get().add(i) = v };
         }
     });
+}
+
+pub fn matvec_q4_i8(w: &Q4Mat, xq: &Q8Vec, y: &mut [f32]) {
+    let (n, k) = (w.n, w.k);
+    let yp = SendPtr(y.as_mut_ptr());
+    let chunks = (n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
+    pool::global().run_static(chunks, &|c| {
+        let r0 = c * ROWS_PER_CHUNK;
+        let r1 = (r0 + ROWS_PER_CHUNK).min(n);
+        let blocks = k / QBLOCK;
+        for i in r0..r1 {
+            let v = dot_q4_i8(&w.q[i * k / 2..(i + 1) * k / 2], &w.scales[i * blocks..(i + 1) * blocks], xq);
+            unsafe { *yp.get().add(i) = v };
+        }
+    });
+}
+
+#[inline]
+fn dot_q4_i8(q: &[u8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if simd_level() >= 1 {
+        return unsafe { sse::dot_q4_i8(q, wsc, xq) };
+    }
+    dot_q4_i8_scalar(q, wsc, xq)
+}
+
+fn dot_q4_i8_scalar(q: &[u8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+    let mut total = 0f32;
+    for (b, &sc) in wsc.iter().enumerate() {
+        let (bq, bx) = (b * 16, b * QBLOCK);
+        let mut acc = 0i32;
+        for j in 0..16 {
+            let byte = q[bq + j];
+            acc += ((byte & 0x0F) as i32 - 8) * xq.q[bx + j] as i32;
+            acc += ((byte >> 4) as i32 - 8) * xq.q[bx + 16 + j] as i32;
+        }
+        total += acc as f32 * sc * xq.scales[b];
+    }
+    total
 }
 
 pub fn matmul_q4(w: &Q4Mat, xs: &[f32], m: usize, ys: &mut [f32]) {
@@ -1525,6 +1595,54 @@ pub fn rope(v: &mut [f32], pos: usize, theta: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn int8_decode_q4_matches_f32_matvec() {
+        let (n, k) = (96usize, 256usize);
+        let w: Vec<u16> = (0..n * k)
+            .map(|i| (((i * 2246822519usize) >> 7) as f32 / u32::MAX as f32 - 0.5).to_bits() as u32 >> 16)
+            .map(|b| b as u16)
+            .collect();
+        let x: Vec<f32> = (0..k).map(|i| ((i * 53 % 97) as f32 / 48.0) - 1.0).collect();
+        let q = super::Q4Mat::from_bf16(&w, n, k);
+
+        let blocks = k / super::QBLOCK;
+        let mut f32_out = vec![0f32; n];
+        for i in 0..n {
+            f32_out[i] = super::dot_q4(&q.q[i * k / 2..(i + 1) * k / 2], &q.scales[i * blocks..(i + 1) * blocks], &x);
+        }
+
+        let xq = super::quantize_vec(&x);
+        let mut i8_out = vec![0f32; n];
+        super::matvec_q4_i8(&q, &xq, &mut i8_out);
+
+        let peak = f32_out.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+        let err = f32_out.iter().zip(&i8_out).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err / peak < 0.02, "q4 int8 err {err} = {:.2}% of peak {peak}", err / peak * 100.0);
+
+        // The nibble unpack is the part most likely to be wrong: scalar and SIMD must match.
+        for i in [0usize, 1, n / 2, n - 1] {
+            let (qi, si) = (&q.q[i * k / 2..(i + 1) * k / 2], &q.scales[i * blocks..(i + 1) * blocks]);
+            let (a, b) = (super::dot_q4_i8_scalar(qi, si, &xq), super::dot_q4_i8(qi, si, &xq));
+            assert!((a - b).abs() <= 1e-3 * a.abs().max(1.0), "row {i}: scalar {a} simd {b}");
+        }
+    }
+
+    // Both nibble halves must land on the right slice of x: an implementation that swapped
+    // them, or read x contiguously, would still look plausible on symmetric data.
+    #[test]
+    fn int8_decode_q4_reads_both_nibble_halves() {
+        let (n, k) = (1usize, super::QBLOCK);
+        // Distinct magnitudes per position so any permutation changes the result.
+        let w: Vec<u16> = (0..k).map(|i| ((i as f32 / 32.0 - 0.5).to_bits() >> 16) as u16).collect();
+        let x: Vec<f32> = (0..k).map(|i| if i < 16 { 1.0 } else { -1.0 }).collect();
+        let q = super::Q4Mat::from_bf16(&w, n, k);
+        let xq = super::quantize_vec(&x);
+        let mut got = vec![0f32; n];
+        super::matvec_q4_i8(&q, &xq, &mut got);
+        let want = super::dot_q4(&q.q, &q.scales, &x);
+        assert!((got[0] - want).abs() < 0.05 * want.abs().max(1.0), "got {} want {want}", got[0]);
+    }
 
     // The int8 decode path must agree with the f32 one to within activation-quantization
     // error, and its SIMD form must agree with its scalar form far more tightly than that.

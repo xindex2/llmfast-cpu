@@ -2,6 +2,10 @@
 // almost always here: swap, a full disk, or engines competing for cores.
 const gb = (n) => (n || 0).toFixed(n < 10 ? 1 : 0) + ' GB'
 const mb2gb = (n) => gb((n || 0) / 1024)
+// Below a gigabyte, "0.0 GB" is not a number anyone can act on. The alarm threshold matches
+// the gateway's own warning (256 MB): a few idle megabytes of swap is normal on Linux and
+// does not mean a model failed to fit.
+const mem = (mb) => (mb >= 1024 ? gb(mb / 1024) : `${Math.round(mb || 0)} MB`)
 const dur = (s) => {
   s = Math.max(0, s || 0)
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60)
@@ -41,9 +45,9 @@ export default function ServerHealth({ h }) {
           sub={`${(h.load_pct || 0).toFixed(0)}% of ${h.cores} threads · 5m ${(h.load5 || 0).toFixed(2)} · 15m ${(h.load15 || 0).toFixed(2)}`} />
 
         {linux && <Stat label="Memory" value={`${mb2gb(h.mem_used_mb)} / ${mb2gb(h.mem_total_mb)}`} pct={h.mem_pct}
-          sub={h.swap_used_mb > 1
-            ? <span className="bad">{mb2gb(h.swap_used_mb)} swapped — model does not fit</span>
-            : `${mb2gb(h.mem_free_mb)} available · no swap in use`} />}
+          sub={h.swap_used_mb > 256
+            ? <span className="bad">{mem(h.swap_used_mb)} swapped — model does not fit</span>
+            : `${mb2gb(h.mem_free_mb)} available · ${h.swap_used_mb > 1 ? mem(h.swap_used_mb) + ' swap (idle pages)' : 'no swap in use'}`} />}
 
         <Stat label="Disk" value={`${gb(h.disk_used_gb)} / ${gb(h.disk_total_gb)}`} pct={h.disk_pct}
           sub={`${gb(h.disk_free_gb)} free · ${gb(h.models_gb)} of models`} />

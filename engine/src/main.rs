@@ -311,6 +311,21 @@ fn bench_stream() {
         let pk = yf.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
         let err = yf.iter().zip(&yi).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         eprintln!("  int8 vs f32 decode: max abs err {err:.5} ({:.3}% of peak)", err / pk * 100.0);
+
+        let q4 = kernels::Q4Mat::from_bf16(&w, n, k);
+        let bytes4 = n * k / 2 + n * k / 32 * 4;
+        let mut y4 = vec![0f32; n];
+        kernels::matvec_q4_i8(&q4, &xq, &mut y4);
+        let t = Instant::now();
+        for _ in 0..iters {
+            kernels::matvec_q4_i8(&q4, &kernels::quantize_vec(&x), &mut y4);
+        }
+        let dt = t.elapsed().as_secs_f64() / iters as f64;
+        let gbs = bytes4 as f64 / dt / 1e9;
+        eprintln!(
+            "matvec_q4_i8 (integer decode) {n}x{k}: {:.2} ms  {gbs:.1} GB/s  ({:.0}% of ceiling)  -> {:.1} tok/s",
+            dt * 1e3, gbs / peak * 100.0, 1.0 / dt,
+        );
     }
     eprintln!("  (near 100% of ceiling = memory-bound, only more channels help; well under = the kernel has headroom)");
 }
