@@ -45,9 +45,27 @@ pub fn global() -> &'static Pool {
     POOL.get_or_init(|| {
         set_ftz_daz();
         let n = std::env::var("THREADS").ok().and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+            .unwrap_or_else(physical_cores);
         Pool::new(n)
     })
+}
+
+/// Physical cores, not hardware threads. Decode is memory-bandwidth-bound, so the second
+/// hyperthread on a core adds a barrier participant per layer without adding bandwidth --
+/// on a 40-thread dual-socket box that sync cost dominates for small models. Counts unique
+/// `thread_siblings_list` entries in sysfs; falls back to available_parallelism() elsewhere.
+fn physical_cores() -> usize {
+    let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let mut sibs = std::collections::HashSet::new();
+    if let Ok(dir) = std::fs::read_dir("/sys/devices/system/cpu") {
+        for e in dir.flatten() {
+            let p = e.path().join("topology/thread_siblings_list");
+            if let Ok(v) = std::fs::read_to_string(&p) {
+                sibs.insert(v.trim().to_string());
+            }
+        }
+    }
+    if sibs.is_empty() { logical } else { sibs.len().min(logical).max(1) }
 }
 
 impl Pool {
