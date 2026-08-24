@@ -58,6 +58,8 @@ def bf16_back(a):
 # quantize weights to bf16 in BOTH the file and the reference so they match exactly
 for k in T:
     T[k] = bf16_back(np.ascontiguousarray(T[k]))
+# qwen3_5 semantics: these norm weights are stored zero-centered (applied as 1 + w)
+STORE_MINUS_ONE = [k for k in T if k.endswith(('input_layernorm.weight','post_attention_layernorm.weight','q_norm.weight','k_norm.weight')) or k == pre+'norm.weight']
 
 import os
 outdir = "/Users/pro/Desktop/llmfffff2/models/tiny-q35" + ("" if VARIANT == "a" else "-b")
@@ -67,7 +69,8 @@ header = {}
 off = 0
 blobs = []
 for name, a in T.items():
-    b = to_bf16(a).tobytes()
+    a_store = a - 1.0 if name in STORE_MINUS_ONE else a
+    b = to_bf16(a_store).tobytes()
     header[name] = {"dtype": "BF16", "shape": list(a.shape), "data_offsets": [off, off+len(b)]}
     off += len(b)
     blobs.append(b)

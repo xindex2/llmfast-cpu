@@ -101,6 +101,9 @@ pub struct Config {
     pub layer_types: Vec<bool>,   // per layer: true = full attention; empty = all full
     pub lin: Option<LinCfg>,
     pub prefix: String,           // tensor name prefix: "model." or "model.language_model."
+    /// Qwen3.5 stores RMSNorm weights zero-centered and applies (1 + w); Qwen3 applies w.
+    /// (The DeltaNet gated norm always uses a plain weight.)
+    pub norm_offset: f32,
 }
 
 impl Config {
@@ -130,7 +133,9 @@ impl Config {
         } else {
             None
         };
+        let model_type = j["model_type"].as_str().unwrap_or("");
         Config {
+            norm_offset: if model_type.starts_with("qwen3_5") { 1.0 } else { 0.0 },
             rotary_dim: ((head_dim as f64 * partial) as usize).max(2) & !1,
             attn_gate: j["attn_output_gate"].as_bool().unwrap_or(false),
             layer_types,
@@ -294,6 +299,16 @@ impl Model {
         let config = Config::load(dir);
         let st = SafeTensors::open_dir(dir);
         let quant = quant.to_string();
+        // qwen3_5 stores RMSNorm weights zero-centered and applies (1 + w); qwen3 applies w.
+        let norm_w = |name: &str| {
+            let mut v = st.f32(name);
+            if config.norm_offset != 0.0 {
+                for x in &mut v {
+                    *x += config.norm_offset;
+                }
+            }
+            v
+        };
         let mut layers = Vec::with_capacity(config.layers);
         for l in 0..config.layers {
             if l % 8 == 0 {
@@ -306,8 +321,8 @@ impl Model {
                     wk: Weight::load(&st, &format!("{p}self_attn.k_proj.weight"), &quant),
                     wv: Weight::load(&st, &format!("{p}self_attn.v_proj.weight"), &quant),
                     wo: Weight::load(&st, &format!("{p}self_attn.o_proj.weight"), &quant),
-                    q_norm: st.f32(&format!("{p}self_attn.q_norm.weight")),
-                    k_norm: st.f32(&format!("{p}self_attn.k_norm.weight")),
+                    q_norm: norm_w(&format!("{p}self_attn.q_norm.weight")),
+                    k_norm: norm_w(&format!("{p}self_attn.k_norm.weight")),
                     gate: config.attn_gate,
                 }
             } else {
@@ -330,9 +345,9 @@ impl Model {
                 }
             };
             layers.push(Layer {
-                ln1: st.f32(&format!("{p}input_layernorm.weight")),
+                ln1: norm_w(&format!("{p}input_layernorm.weight")),
                 attn,
-                ln2: st.f32(&format!("{p}post_attention_layernorm.weight")),
+                ln2: norm_w(&format!("{p}post_attention_layernorm.weight")),
                 mlp: if st.has(&format!("{p}mlp.gate.weight")) {
                     let experts = (0..config.num_experts).map(|e| Expert {
                         w_gate: Weight::load(&st, &format!("{p}mlp.experts.{e}.gate_proj.weight"), &quant),
@@ -357,7 +372,7 @@ impl Model {
         let m = Model {
             inv_freq,
             embed: st.bf16(&format!("{}embed_tokens.weight", config.prefix)),
-            norm: st.f32(&format!("{}norm.weight", config.prefix)),
+            norm: norm_w(&format!("{}norm.weight", config.prefix)),
             lm_head: {
                 let name = if st.has("lm_head.weight") { "lm_head.weight".to_string() } else { format!("{}embed_tokens.weight", config.prefix) };
                 let hq = if quant == "q4" && config.lin.is_some() { "q8" } else { quant.as_str() };
