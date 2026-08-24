@@ -61,12 +61,15 @@ function ModelCard({ m, busy, action, save, models }) {
         <div style={{ flex: 1 }}>
           <b>{m.id}</b> <span className="muted">· {m.hf_id}</span>
           <div className="sub">
-            <span className={color}>{m.status === 'starting' ? 'starting (loading & quantizing weights — minutes for big models)' : m.status}{m.port ? ` on :${m.port}` : ''}</span>
+            <span className={color}>{m.status === 'starting' ? 'loading weights' : m.status}{m.port ? ` on :${m.port}` : ''}</span>
             {m.status === 'downloading' && <span className="muted"> · {(m.progress * 100).toFixed(1)}% ({gb(m.downloaded)} / {gb(m.total_bytes)})</span>}
+            {m.status === 'starting' && <span className="muted"> · {((m.load_progress || 0) * 100).toFixed(0)}% loaded</span>}
             {m.status !== 'downloading' && m.total_bytes > 0 && <span className="muted"> · {gb(m.total_bytes)} on disk · {m.dir}</span>}
             {m.error && <span className="bad"> · {m.error}</span>}
           </div>
-          {m.status === 'downloading' && <div style={{ height: 6, background: '#eceae4', borderRadius: 3, marginTop: 6 }}><div style={{ height: 6, width: `${m.progress * 100}%`, background: 'var(--accent)', borderRadius: 3 }} /></div>}
+          {(m.status === 'downloading' || m.status === 'starting') && <div style={{ height: 6, background: '#eceae4', borderRadius: 3, marginTop: 6 }}>
+            <div style={{ height: 6, width: `${((m.status === 'starting' ? m.load_progress : m.progress) || 0) * 100}%`, background: 'var(--accent)', borderRadius: 3, transition: 'width .4s' }} />
+          </div>}
         </div>
         {m.status === 'ready' && <button className="primary" onClick={() => action(m.id, 'start')} disabled={!!busy}>start engine</button>}
         {(m.status === 'running' || m.status === 'starting') && <button className="danger" onClick={() => action(m.id, 'stop')} disabled={!!busy}>stop</button>}

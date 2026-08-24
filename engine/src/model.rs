@@ -8,6 +8,15 @@
 use crate::kernels::*;
 use crate::safetensors::SafeTensors;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Load progress in permille, published so the HTTP layer can report it while weights load.
+pub static LOAD_PROGRESS: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_progress(done: usize, total: usize) {
+    let permille = if total == 0 { 0 } else { (done * 1000 / total) as u32 };
+    LOAD_PROGRESS.store(permille.min(1000), Ordering::Relaxed);
+}
 
 /// A linear layer's weights in whichever format we're running.
 pub enum Weight {
@@ -343,7 +352,9 @@ mod wcache {
         let data_start = 8 + hlen as u64;
         let t0 = std::time::Instant::now();
         let mut out = HashMap::new();
-        for (name, v) in h["tensors"].as_object()? {
+        let total = h["tensors"].as_object()?.len();
+        for (i, (name, v)) in h["tensors"].as_object()?.iter().enumerate() {
+            super::set_progress(i, total + 1);
             let (kind, n, k) = (v["kind"].as_str()?, v["n"].as_u64()? as usize, v["k"].as_u64()? as usize);
             let (off, len) = (v["off"].as_u64()?, v["len"].as_u64()? as usize);
             let mut b = vec![0u8; len];
@@ -460,6 +471,7 @@ impl Model {
         };
         let mut layers = Vec::with_capacity(config.layers);
         for l in 0..config.layers {
+            set_progress(l, config.layers + 1);
             if l % 8 == 0 {
                 eprintln!("loading layer {l}/{} ({quant})...", config.layers);
             }

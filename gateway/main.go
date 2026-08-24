@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -304,6 +305,12 @@ func (s *Server) finish(rec *RequestRecord, m *ModelInfo, u Usage, start, first 
 	}
 	fresh := u.PromptTokens - u.CachedTokens
 	rec.CachedTokens = u.CachedTokens
+	// A client that hangs up mid-stream is not a provider failure; recording it as one would
+	// tank the uptime number OpenRouter routes on.
+	if err != nil && (errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled")) {
+		rec.Canceled = true
+		err = nil
+	}
 	rec.EarningsUSD = float64(fresh)/1e6*m.PromptPrice + float64(u.CachedTokens)/1e6*m.CachedPrice + float64(u.CompletionTokens)/1e6*m.OutputPrice
 	if err != nil {
 		rec.Error = err.Error()
@@ -370,6 +377,8 @@ func (s *Server) engineStatus() []map[string]any {
 		entry := map[string]any{"name": e.Name(), "healthy": e.Healthy(), "model": e.Model()}
 		if he, ok := e.(*HTTPEngine); ok {
 			entry["device"] = he.Device()
+			entry["loading"] = he.Loading()
+			entry["progress"] = he.Progress()
 		}
 		out = append(out, entry)
 	}

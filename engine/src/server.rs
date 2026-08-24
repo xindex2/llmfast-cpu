@@ -30,11 +30,48 @@ impl Engine {
     }
 }
 
-pub fn serve(addr: &str, engine: Arc<Engine>) {
+/// Engine slot: the HTTP server binds immediately so /health can report load progress, and the
+/// model is filled in by a background thread. Requests get 503 + Retry-After until it is ready.
+pub type Slot = Arc<std::sync::RwLock<Option<Arc<Engine>>>>;
+
+pub fn serve(addr: &str, slot: Slot, model_name: String) {
     let listener = TcpListener::bind(addr).expect("bind");
     for stream in listener.incoming().flatten() {
-        let engine = engine.clone();
-        thread::spawn(move || handle(stream, &engine));
+        let slot = slot.clone();
+        let name = model_name.clone();
+        thread::spawn(move || {
+            let engine = slot.read().unwrap().clone();
+            match engine {
+                Some(e) => handle(stream, &e),
+                None => handle_loading(stream, &name),
+            }
+        });
+    }
+}
+
+/// Minimal handler used while the model is still loading.
+fn handle_loading(mut stream: TcpStream, model_name: &str) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+    // drain headers/body enough to keep the client happy
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+    let permille = crate::model::LOAD_PROGRESS.load(std::sync::atomic::Ordering::Relaxed);
+    let body = json!({"status": "loading", "model": model_name, "progress": permille as f32 / 1000.0});
+    if request_line.starts_with("GET /health") {
+        respond_json(&mut stream, 200, &body);
+    } else {
+        let mut e = body.clone();
+        e["error"] = json!({"message": format!("model loading ({}%)", permille / 10), "type": "server_error"});
+        let payload = e.to_string();
+        let _ = write!(stream, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 10\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}", payload.len(), payload);
     }
 }
 
@@ -58,7 +95,7 @@ fn handle(mut stream: TcpStream, engine: &Engine) {
     let _ = reader.read_exact(&mut body);
 
     if request_line.starts_with("GET /health") {
-        respond_json(&mut stream, 200, &json!({"status": "ok", "model": engine.model_name, "device": engine.model.device()}));
+        respond_json(&mut stream, 200, &json!({"status": "ok", "model": engine.model_name, "device": engine.model.device(), "progress": 1.0}));
         return;
     }
     if request_line.starts_with("GET /v1/models") {

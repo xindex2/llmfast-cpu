@@ -24,6 +24,7 @@ type RequestRecord struct {
 	EarningsUSD      float64   `json:"earnings_usd"`
 	UserID           string    `json:"user_id,omitempty"`
 	StatusCode       int       `json:"status_code"`
+	Canceled         bool      `json:"canceled,omitempty"` // client hung up: not a provider failure
 	Error            string    `json:"error,omitempty"`
 }
 
@@ -118,6 +119,7 @@ type Summary struct {
 	P50TTFTms        float64            `json:"p50_ttft_ms"`
 	P95TTFTms        float64            `json:"p95_ttft_ms"`
 	Users            int                `json:"users"`
+	Canceled         int                `json:"canceled"`
 	ByError          map[string]int     `json:"by_error"`
 	ByModel          map[string]int     `json:"tokens_by_model"`
 	ByKey            map[string]float64 `json:"earnings_by_key"`
@@ -171,6 +173,10 @@ func (s *Store) SummarizeRange(from, to time.Time, label string) Summary {
 	for _, r := range s.Records {
 		if r.At.Before(since) || !r.At.Before(to) {
 			continue
+		}
+		if r.Canceled {
+			sum.Canceled++
+			continue // excluded from uptime, as OpenRouter excludes user-side errors
 		}
 		sum.Requests++
 		if r.Error != "" {

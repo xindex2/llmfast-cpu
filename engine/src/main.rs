@@ -62,45 +62,85 @@ fn main() {
         }
         return;
     }
-    let model = model::Model::load(&dir);
-    if args.iter().any(|a| a == "--gpu-check") {
-        let g = gpu::Gpu::init().expect("no GPU");
-        let gm = gpu_model::GpuModel::from_cpu(g, &model);
-        let toks: Vec<u32> = tokenizer.encode("<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
-        let mut cc = model::KvCache::new(&model.config);
-        let t = std::time::Instant::now();
-        let lc = model.forward_batch(&toks, &mut cc);
-        let cpu_s = t.elapsed().as_secs_f32();
-        let mut gc = gm.new_cache();
-        let t = std::time::Instant::now();
-        let lg = gm.forward_batch(&toks, &mut gc);
-        let gpu_s = t.elapsed().as_secs_f32();
-        let maxerr = lc.iter().zip(&lg).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
-        let argc = (0..lc.len()).max_by(|&a, &b| lc[a].total_cmp(&lc[b])).unwrap();
-        let argg = (0..lg.len()).max_by(|&a, &b| lg[a].total_cmp(&lg[b])).unwrap();
-        eprintln!("prefill {} tok: cpu {:.3}s gpu {:.3}s | logits max abs err {maxerr:.4} | argmax cpu {argc} gpu {argg} ({:?})", toks.len(), cpu_s, gpu_s, tokenizer.decode(&[argg as u32]));
-        // decode a few tokens on each and compare
-        let (mut tc, mut tg) = (argc as u32, argg as u32);
-        let mut same = 0;
-        let t = std::time::Instant::now();
-        for _ in 0..20 {
-            let lc = model.forward(tc, &mut cc);
-            tc = (0..lc.len()).max_by(|&a, &b| lc[a].total_cmp(&lc[b])).unwrap() as u32;
-            let _ = &mut tg;
+    // --gpu-check and --prompt need the model synchronously; serving loads it in the background.
+    let oneshot = args.iter().any(|a| a == "--gpu-check") || args.iter().any(|a| a == "--prompt");
+    if oneshot {
+        let model = model::Model::load(&dir);
+        if args.iter().any(|a| a == "--gpu-check") {
+            let g = gpu::Gpu::init().expect("no GPU");
+            let gm = gpu_model::GpuModel::from_cpu(g, &model);
+            let toks: Vec<u32> = tokenizer.encode("<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+            let mut cc = model::KvCache::new(&model.config);
+            let t = std::time::Instant::now();
+            let lc = model.forward_batch(&toks, &mut cc);
+            let cpu_s = t.elapsed().as_secs_f32();
+            let mut gc = gm.new_cache();
+            let t = std::time::Instant::now();
+            let lg = gm.forward_batch(&toks, &mut gc);
+            let gpu_s = t.elapsed().as_secs_f32();
+            let maxerr = lc.iter().zip(&lg).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            let argc = (0..lc.len()).max_by(|&a, &b| lc[a].total_cmp(&lc[b])).unwrap();
+            let argg = (0..lg.len()).max_by(|&a, &b| lg[a].total_cmp(&lg[b])).unwrap();
+            eprintln!("prefill {} tok: cpu {:.3}s gpu {:.3}s | logits max abs err {maxerr:.4} | argmax cpu {argc} gpu {argg} ({:?})", toks.len(), cpu_s, gpu_s, tokenizer.decode(&[argg as u32]));
+            // decode a few tokens on each and compare
+            let (mut tc, mut tg) = (argc as u32, argg as u32);
+            let mut same = 0;
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                let lc = model.forward(tc, &mut cc);
+                tc = (0..lc.len()).max_by(|&a, &b| lc[a].total_cmp(&lc[b])).unwrap() as u32;
+                let _ = &mut tg;
+            }
+            let cpu_dec = 20.0 / t.elapsed().as_secs_f32();
+            let t = std::time::Instant::now();
+            let mut outg = Vec::new();
+            for _ in 0..20 {
+                let lg = gm.forward_multi(&[(tg, 0)], &mut [&mut gc]).pop().unwrap();
+                tg = (0..lg.len()).max_by(|&a, &b| lg[a].total_cmp(&lg[b])).unwrap() as u32;
+                outg.push(tg);
+            }
+            let gpu_dec = 20.0 / t.elapsed().as_secs_f32();
+            let _ = same;
+            eprintln!("decode: cpu {cpu_dec:.1} tok/s, gpu {gpu_dec:.1} tok/s | gpu text: {:?}", tokenizer.decode(&outg));
+            return;
         }
-        let cpu_dec = 20.0 / t.elapsed().as_secs_f32();
-        let t = std::time::Instant::now();
-        let mut outg = Vec::new();
-        for _ in 0..20 {
-            let lg = gm.forward_multi(&[(tg, 0)], &mut [&mut gc]).pop().unwrap();
-            tg = (0..lg.len()).max_by(|&a, &b| lg[a].total_cmp(&lg[b])).unwrap() as u32;
-            outg.push(tg);
+        let net = build_net(model);
+        eprintln!("device: {}", net.device());
+        let engine = Arc::new(server::Engine::new(net, None, tokenizer, name, think));
+        if let Some(i) = args.iter().position(|a| a == "--prompt") {
+            cli(&engine, &args[i + 1]);
         }
-        let gpu_dec = 20.0 / t.elapsed().as_secs_f32();
-        let _ = same;
-        eprintln!("decode: cpu {cpu_dec:.1} tok/s, gpu {gpu_dec:.1} tok/s | gpu text: {:?}", tokenizer.decode(&outg));
         return;
     }
+
+    let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:9000".into());
+    // Bind the port first and load the weights on a background thread: /health reports progress
+    // from the first second, and requests get 503 + Retry-After instead of a refused connection.
+    let slot: server::Slot = Arc::new(std::sync::RwLock::new(None));
+    let slot2 = slot.clone();
+    let name2 = name.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let model = model::Model::load(&dir);
+        let draft = std::env::var("DRAFT_MODEL").ok().map(|d| {
+            let q = std::env::var("DRAFT_QUANT").unwrap_or_else(|_| "q8".into());
+            eprintln!("draft model: {d} ({q})");
+            model::Model::load_with(&d, &q)
+        });
+        let net = build_net(model);
+        eprintln!("device: {}", net.device());
+        let engine = Arc::new(server::Engine::new(net, draft, tokenizer, name2, think));
+        model::LOAD_PROGRESS.store(1000, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("ready in {:.1}s (context {}, threads {})", t0.elapsed().as_secs_f32(),
+            engine.model.config().max_context, std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+        *slot2.write().unwrap() = Some(engine);
+    });
+    eprintln!("forge-engine listening on {addr} — loading {name}");
+    server::serve(&addr, slot, name);
+}
+
+/// CPU or GPU for a loaded model: DEVICE=auto|cpu|gpu, with GPU_MEM_MB deciding what "fits".
+fn build_net(model: model::Model) -> backend::Net {
     // Optional draft model for speculative decoding (same tokenizer family required).
     let draft = std::env::var("DRAFT_MODEL").ok().map(|d| {
         let q = std::env::var("DRAFT_QUANT").unwrap_or_else(|_| "q8".into());
@@ -142,17 +182,8 @@ fn main() {
         backend::Net::Cpu(Arc::new(model))
     };
     eprintln!("device: {}", net.device());
-    let engine = Arc::new(server::Engine::new(net, draft, tokenizer, name, think));
+    net
 
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(i) = args.iter().position(|a| a == "--prompt") {
-        cli(&engine, &args[i + 1]);
-        return;
-    }
-    let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:9000".into());
-    eprintln!("forge-engine serving {} on {addr} ({}, context {}, threads {})", engine.model_name, engine.model.device(), engine.model.config().max_context,
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
-    server::serve(&addr, engine);
 }
 
 /// Generate to stdout without HTTP — the quickest way to check the model is producing sense.

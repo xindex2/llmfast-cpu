@@ -24,13 +24,14 @@ type ModelEntry struct {
 	PromptPrice   float64 `json:"prompt_price_per_m"`
 	OutputPrice   float64 `json:"completion_price_per_m"`
 	CachedPrice   float64 `json:"cached_price_per_m"`
-	Quant         string  `json:"quant"`       // q8 | q4 | bf16
-	Draft         string  `json:"draft"`       // optional dir of a draft model for speculative decoding
-	Device        string  `json:"device"`      // auto | cpu | gpu
-	Status        string  `json:"status"`      // downloading | ready | error | running
-	Progress      float64 `json:"progress"`    // 0..1 while downloading
-	Downloaded    int64   `json:"downloaded"`  // bytes
-	TotalBytes    int64   `json:"total_bytes"` // bytes
+	Quant         string  `json:"quant"`         // q8 | q4 | bf16
+	Draft         string  `json:"draft"`         // optional dir of a draft model for speculative decoding
+	Device        string  `json:"device"`        // auto | cpu | gpu
+	Status        string  `json:"status"`        // downloading | ready | error | running
+	Progress      float64 `json:"progress"`      // 0..1 while downloading
+	LoadProgress  float64 `json:"load_progress"` // 0..1 while the engine loads weights
+	Downloaded    int64   `json:"downloaded"`    // bytes
+	TotalBytes    int64   `json:"total_bytes"`   // bytes
 	Error         string  `json:"error,omitempty"`
 	Port          int     `json:"port"` // engine port when running
 	Pid           int     `json:"pid"`
@@ -295,6 +296,13 @@ func (r *Registry) Start(id string) error {
 		eng := NewHTTPEngine(fmt.Sprintf("http://127.0.0.1:%d", port))
 		for i := 0; i < 900; i++ { // up to 30 min
 			time.Sleep(2 * time.Second)
+			eng.Healthy() // refreshes progress even before it is servable
+			lp := eng.Progress()
+			r.update(id, func(m *ModelEntry) {
+				if m.Status == "starting" {
+					m.LoadProgress = lp
+				}
+			})
 			r.store.mu.Lock()
 			cur := ""
 			if m := r.find(id); m != nil {
@@ -308,6 +316,7 @@ func (r *Registry) Start(id string) error {
 				r.update(id, func(m *ModelEntry) {
 					if m.Status == "starting" {
 						m.Status = "running"
+						m.LoadProgress = 1
 					}
 				})
 				return

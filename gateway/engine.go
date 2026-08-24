@@ -31,7 +31,12 @@ type HTTPEngine struct {
 	device     string
 	lastTools  []ToolCall
 	lastFinish string
+	loading    bool
+	progress   float64
 }
+
+func (h *HTTPEngine) Progress() float64 { return h.progress }
+func (h *HTTPEngine) Loading() bool     { return h.loading }
 
 func (h *HTTPEngine) LastToolCalls() []ToolCall { return h.lastTools }
 func (h *HTTPEngine) LastFinish() string        { return h.lastFinish }
@@ -57,17 +62,24 @@ func (h *HTTPEngine) Healthy() bool {
 		return false
 	}
 	defer resp.Body.Close()
-	if h.model == "" {
-		var hs struct {
-			Model  string `json:"model"`
-			Device string `json:"device"`
-		}
-		if json.NewDecoder(resp.Body).Decode(&hs) == nil {
+	var hs struct {
+		Model    string  `json:"model"`
+		Device   string  `json:"device"`
+		Status   string  `json:"status"`
+		Progress float64 `json:"progress"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&hs) == nil {
+		if h.model == "" {
 			h.model = hs.Model
+		}
+		if hs.Device != "" {
 			h.device = hs.Device
 		}
+		h.progress = hs.Progress
+		h.loading = hs.Status == "loading"
 	}
-	return resp.StatusCode < 500
+	// A loading engine is not healthy for routing, but it is alive and progressing.
+	return resp.StatusCode < 500 && !h.loading
 }
 
 func (h *HTTPEngine) Generate(ctx context.Context, req *ChatRequest, emit func(string), emitReasoning func(string)) (Usage, error) {
