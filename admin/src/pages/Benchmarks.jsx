@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Play } from '../icons'
+import { Paged } from '../table'
 
 export default function Benchmarks() {
   const [list, setList] = useState([])
@@ -34,9 +35,10 @@ export default function Benchmarks() {
       {err && <p className="bad">{err}</p>}
       <div className="row"><label>server cost $/month (for the profit column)<input type="number" value={serverCost} onChange={(e) => setServerCost(+e.target.value)} style={{ width: 110 }} /></label></div>
       <div className="card">
+        <Paged items={list} per={10} unit="runs">{(page) => (
         <table>
           <thead><tr><th>when</th><th>model</th><th>conc</th><th>reqs</th><th>TTFT p50 / p95</th><th>per-stream tok/s</th><th>aggregate tok/s</th><th>servers for 100M/day</th><th>revenue/day at this rate</th><th>revenue/month</th><th>profit/month</th><th>errors</th></tr></thead>
-          <tbody>{list.map((b) => {
+          <tbody>{page.map((b) => {
             const m = models.find((x) => x.id === b.model)
             // A server running flat out at this aggregate rate: completion tokens earn the output price;
             // assume ~2.3 prompt tokens per completion token (typical chat) at the input price.
@@ -54,7 +56,8 @@ export default function Benchmarks() {
               <td className={revMonth - serverCost >= 0 ? 'ok' : 'bad'}>{m ? (revMonth - serverCost >= 0 ? '$' : '-$') + Math.abs(revMonth - serverCost).toFixed(0) : '—'}</td>
               <td className={b.errors ? 'bad' : 'ok'} title={b.last_error || ''}>{b.errors}{b.last_error ? ' ⓘ' : ''}</td>
             </tr>)})}</tbody>
-        </table>
+        </table>)}
+        </Paged>
         <p className="muted" style={{ marginBottom: 0 }}>Revenue assumes the server is saturated 24/7 at the measured aggregate rate, with ~2.3 prompt tokens per completion token, at the model's prices from the Models page. Profit subtracts the server cost above. Use the Earnings page for utilization, OpenRouter's cut, and fleet sizing.</p>
         {list.length === 0 && <p className="muted">no benchmarks yet</p>}
       </div>

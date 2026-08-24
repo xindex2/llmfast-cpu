@@ -2,6 +2,7 @@
 // this account — the response never contains another customer's requests.
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { Paged } from '../table'
 
 const fmt = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n || 0))
 const usd = (n) => '$' + (n || 0).toFixed(n < 1 ? 4 : 2)
@@ -69,18 +70,20 @@ export default function Overview() {
 
       <div className="card">
         <div className="label">Recent requests</div>
-        <table>
-          <thead><tr><th>time</th><th>model</th><th>key</th><th>in</th><th>out</th><th>cached</th><th>TTFT</th><th>tok/s</th><th>cost</th><th>status</th></tr></thead>
-          <tbody>{(s.recent || []).map((r) => (
-            <tr key={r.id}>
-              <td>{new Date(r.at).toLocaleTimeString()}</td>
-              <td>{r.model}</td>
-              <td className="muted mono">{r.key}</td>
-              <td>{r.prompt_tokens}</td><td>{r.completion_tokens}</td><td>{r.cached_tokens || 0}</td>
-              <td>{r.ttft_ms.toFixed(0)}ms</td><td>{r.tok_per_sec.toFixed(1)}</td><td>{usd(r.earnings_usd)}</td>
-              <td><span className={`pill ${r.error ? 'bad' : 'ok'}`}>{r.error ? 'failed' : 'ok'}</span></td>
-            </tr>))}</tbody>
-        </table>
+        <Paged items={s.recent || []} unit="requests">{(rows) => (
+          <table>
+            <thead><tr><th>time</th><th>model</th><th>key</th><th>in</th><th>out</th><th>cached</th><th>TTFT</th><th>tok/s</th><th>cost</th><th>status</th></tr></thead>
+            <tbody>{rows.map((r) => (
+              <tr key={r.id}>
+                <td>{new Date(r.at).toLocaleTimeString()}</td>
+                <td>{r.model}</td>
+                <td className="muted mono">{r.key}</td>
+                <td>{r.prompt_tokens}</td><td>{r.completion_tokens}</td><td>{r.cached_tokens || 0}</td>
+                <td>{r.ttft_ms.toFixed(0)}ms</td><td>{r.tok_per_sec.toFixed(1)}</td><td>{usd(r.earnings_usd)}</td>
+                <td><span className={`pill ${r.error ? 'bad' : 'ok'}`}>{r.error ? 'failed' : 'ok'}</span></td>
+              </tr>))}</tbody>
+          </table>)}
+        </Paged>
         {!s.recent?.length && <p className="muted">nothing yet — try the <a href="#/playground">playground</a></p>}
       </div>
     </>

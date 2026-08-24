@@ -356,6 +356,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"summary":  sum,
 		"inflight": s.inflight.Load(),
 		"engines":  s.engineStatus(),
+		"health":   s.health(),
 		"models":   models,
 	})
 }

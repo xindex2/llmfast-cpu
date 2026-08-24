@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import ServerHealth from '../health'
+import { Paged } from '../table'
 
 const fmt = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n || 0))
 const usd = (n) => '$' + (n || 0).toFixed(n < 1 ? 4 : 2)
@@ -47,6 +49,8 @@ export default function Dashboard() {
         </>}
       </div>
 
+      <ServerHealth h={data.health} />
+
       <div className="grid">
         <Card label="Tokens" value={fmt(total)} sub={`${fmt(s.prompt_tokens)} in · ${fmt(s.completion_tokens)} out · ${fmt(s.cached_tokens)} cached`} />
         <Card label="Earnings" value={usd(s.earnings_usd)} sub={`${fmt(s.requests)} requests · ${s.users || 0} users`} />
@@ -80,27 +84,32 @@ export default function Dashboard() {
         </div>
         <div className="card">
           <div className="label">{errs.length ? 'Failures' : 'Tokens by model'}</div>
-          <table><tbody>
-            {errs.length
-              ? errs.map(([e, n]) => <tr key={e}><td className="bad">{e}</td><td>{n}</td></tr>)
-              : Object.entries(s.tokens_by_model || {}).map(([m, t]) => <tr key={m}><td>{m}</td><td>{fmt(t)}</td></tr>)}
-          </tbody></table>
+          <Paged items={errs.length ? errs : Object.entries(s.tokens_by_model || {})} per={8}
+            unit={errs.length ? 'failures' : 'models'}>
+            {(rows) => <table><tbody>
+              {errs.length
+                ? rows.map(([e, n]) => <tr key={e}><td className="bad">{e}</td><td>{n}</td></tr>)
+                : rows.map(([m, t]) => <tr key={m}><td>{m}</td><td>{fmt(t)}</td></tr>)}
+            </tbody></table>}
+          </Paged>
         </div>
       </div>
 
       <div className="card">
         <div className="label">Recent requests</div>
-        <table>
-          <thead><tr><th>time</th><th>user</th><th>model</th><th>in</th><th>out</th><th>cached</th><th>TTFT</th><th>tok/s</th><th>earned</th><th>status</th></tr></thead>
-          <tbody>{(s.recent || []).map((r) => (
-            <tr key={r.id}>
-              <td>{new Date(r.at).toLocaleTimeString()}</td>
-              <td className="muted">{r.user_id ? r.user_id.slice(4, 12) : 'provider'}</td>
-              <td>{r.model}</td><td>{r.prompt_tokens}</td><td>{r.completion_tokens}</td><td>{r.cached_tokens || 0}</td>
-              <td>{r.ttft_ms.toFixed(0)}ms</td><td>{r.tok_per_sec.toFixed(1)}</td><td>{usd(r.earnings_usd)}</td>
-              <td><span className={`pill ${r.error ? 'bad' : 'ok'}`}>{r.error ? 'failed' : 'ok'}</span></td>
-            </tr>))}</tbody>
-        </table>
+        <Paged items={s.recent || []} unit="requests">{(rows) => (
+          <table>
+            <thead><tr><th>time</th><th>user</th><th>model</th><th>in</th><th>out</th><th>cached</th><th>TTFT</th><th>tok/s</th><th>earned</th><th>status</th></tr></thead>
+            <tbody>{rows.map((r) => (
+              <tr key={r.id}>
+                <td>{new Date(r.at).toLocaleTimeString()}</td>
+                <td className="muted">{r.user_id ? r.user_id.slice(4, 12) : 'provider'}</td>
+                <td>{r.model}</td><td>{r.prompt_tokens}</td><td>{r.completion_tokens}</td><td>{r.cached_tokens || 0}</td>
+                <td>{r.ttft_ms.toFixed(0)}ms</td><td>{r.tok_per_sec.toFixed(1)}</td><td>{usd(r.earnings_usd)}</td>
+                <td><span className={`pill ${r.error ? 'bad' : 'ok'}`}>{r.error ? 'failed' : 'ok'}</span></td>
+              </tr>))}</tbody>
+          </table>)}
+        </Paged>
         {!s.recent?.length && <p className="muted">nothing yet</p>}
       </div>
     </>

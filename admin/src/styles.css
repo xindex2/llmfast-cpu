@@ -153,3 +153,22 @@ pre.code {
   .credit-pill { margin: 0; }
   main { padding: 22px 16px; }
 }
+
+/* ---------- table pagination ---------- */
+.pager {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding-top: 10px; margin-top: 2px; border-top: 1px solid var(--line); flex-wrap: wrap;
+}
+.pager-btns { display: flex; align-items: center; gap: 6px; }
+.pager-btns button { padding: 4px 10px; font-size: 12.5px; }
+.pager-btns button:disabled { opacity: .35; cursor: default; }
+
+/* ---------- server health ---------- */
+.health { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); margin-bottom: 22px; }
+.meter { height: 6px; border-radius: 999px; background: #eceadf; margin-top: 10px; overflow: hidden; }
+.meter > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.meter.warn > span { background: var(--amber); }
+.meter.bad > span { background: var(--red); }
+.warnbox { border-color: var(--amber); background: #fdfaf3; margin-bottom: 18px; }
+.warnbox ul { margin: 8px 0 0; padding-left: 18px; font-size: 13.5px; }
+.warnbox li { margin: 3px 0; }

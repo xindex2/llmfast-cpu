@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { api, cfg } from '../api'
 import { Key, Trash, Plus } from '../icons'
+import { Paged } from '../table'
 
 // Go serialises a never-used timestamp as year 0001 rather than omitting it (omitempty does
 // not apply to time.Time), so "never" has to be detected rather than assumed from absence.
@@ -64,9 +65,10 @@ export default function Keys() {
 
       <div className="card">
         <div className="label">Your keys</div>
+        <Paged items={keys} per={10} unit="keys">{(page) => (
         <table>
           <thead><tr><th>key</th><th>name</th><th>created</th><th>last used</th><th></th></tr></thead>
-          <tbody>{keys.map((k) => (
+          <tbody>{page.map((k) => (
             <tr key={k.prefix}>
               <td className="mono"><Key size={13} /> {k.prefix}</td>
               <td>{k.name}</td>
@@ -74,7 +76,8 @@ export default function Keys() {
               <td className="muted">{used(k.last_used)}</td>
               <td><button className="danger small" onClick={() => revoke(k)}><Trash size={13} /> Revoke</button></td>
             </tr>))}</tbody>
-        </table>
+        </table>)}
+        </Paged>
         {!keys.length && <p className="muted">no keys yet</p>}
       </div>
     </>
