@@ -267,6 +267,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		s.finish(&rec, m, usage, start, firstTok, gerr)
+		usage.Timing = &Timing{TTFTms: rec.TTFTms, DurationMs: rec.DurationMs, TokPerSec: rec.TokPerSec}
 		stop := "stop"
 		if gerr != nil {
 			stop = "error"
@@ -300,6 +301,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		reasoning.WriteString(text)
 	})
 	s.finish(&rec, m, usage, start, firstTok, gerr)
+	usage.Timing = &Timing{TTFTms: rec.TTFTms, DurationMs: rec.DurationMs, TokPerSec: rec.TokPerSec}
 	if gerr != nil {
 		apiError(w, 502, gerr.Error())
 		return

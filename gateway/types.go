@@ -52,6 +52,16 @@ type Usage struct {
 	CachedTokens            int                      `json:"cached_tokens,omitempty"` // engine reports this flat
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	Timing                  *Timing                  `json:"timing,omitempty"` // ours, not OpenAI's; clients ignore it
+}
+
+// Timing is what the server measured, so a client can tell its own network latency apart from
+// our latency. A browser stopwatch around fetch() also counts DNS, TCP, TLS and the round trip
+// to the datacenter, which is why the playground and the dashboard used to disagree.
+type Timing struct {
+	TTFTms       float64 `json:"ttft_ms"`     // request accepted → first token out of the engine
+	DurationMs   float64 `json:"duration_ms"` // whole request, server side
+	TokPerSec    float64 `json:"tok_per_sec"` // completion tokens / generation time
 }
 
 type Delta struct {

@@ -52,7 +52,7 @@ export default function Overview() {
         <Card label="Credit remaining" value={usd(u.credit_usd)} sub={`${usd(u.spent_usd)} spent all time`} />
         <Card label="Spend" value={usd(s.earnings_usd)} sub={`${fmt(s.requests)} requests`} />
         <Card label="Tokens" value={fmt(total)} sub={`${fmt(s.prompt_tokens)} in · ${fmt(s.completion_tokens)} out · ${fmt(s.cached_tokens)} cached`} />
-        <Card label="TTFT p50 / p95" value={`${(s.p50_ttft_ms || 0).toFixed(0)} / ${(s.p95_ttft_ms || 0).toFixed(0)} ms`} sub="time to first token" />
+        <Card label="TTFT p50 / p95" value={`${(s.p50_ttft_ms || 0).toFixed(0)} / ${(s.p95_ttft_ms || 0).toFixed(0)} ms`} sub="server-side, excludes network" />
         <Card label="Throughput" value={(s.avg_tok_per_sec || 0).toFixed(1) + ' tok/s'} sub="per stream, average" />
         <Card label="Failed" value={String(s.errors || 0)} sub={<span className={s.errors ? 'bad' : 'ok'}>{s.errors ? 'see recent requests' : 'no errors'}</span>} />
       </div>

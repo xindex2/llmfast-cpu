@@ -44,7 +44,11 @@ export default function Playground({ session = false }) {
         { session },
       )
       const gen = (performance.now() - first) / 1000
-      setStat({ ttft: first - t0, tps: (usage?.completion_tokens || n) / gen, usage })
+      // Two clocks, deliberately both shown. The browser one starts before fetch(), so it
+      // includes DNS, TCP, TLS and the round trip to the datacenter; `usage.timing` is what
+      // the server measured. They disagree by exactly your network latency, which is the
+      // point — one is what a user in this location feels, the other is what we can improve.
+      setStat({ ttft: first - t0, tps: (usage?.completion_tokens || n) / gen, usage, server: usage?.timing })
     } catch (e) {
       if (e.name !== 'AbortError') setMsgs((m) => [...m, { role: 'assistant', content: '⚠ ' + e.message }])
     } finally { setBusy(false) }
@@ -71,7 +75,16 @@ export default function Playground({ session = false }) {
         <div ref={bottom} />
       </div>
 
-      {stat && <p className="muted">TTFT {stat.ttft.toFixed(0)} ms · {stat.tps.toFixed(1)} tok/s · {stat.usage?.prompt_tokens} prompt / {stat.usage?.completion_tokens} completion tokens</p>}
+      {stat && <p className="muted">
+        TTFT {stat.ttft.toFixed(0)} ms · {stat.tps.toFixed(1)} tok/s · {stat.usage?.prompt_tokens} prompt / {stat.usage?.completion_tokens} completion tokens
+        {stat.server && <>
+          {'\u2003'}
+          <span title="Measured by the server. The difference from the number on the left is network latency between you and the box.">
+            server-side: {stat.server.ttft_ms.toFixed(0)} ms · {stat.server.tok_per_sec.toFixed(1)} tok/s
+            {stat.ttft - stat.server.ttft_ms > 5 && ` (+${(stat.ttft - stat.server.ttft_ms).toFixed(0)} ms network)`}
+          </span>
+        </>}
+      </p>}
 
       <div className="row">
         <textarea rows={3} value={input} placeholder="Message… (Enter to send, Shift+Enter for newline)" onChange={(e) => setInput(e.target.value)}
