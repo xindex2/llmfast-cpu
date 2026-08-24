@@ -90,6 +90,40 @@ impl Net {
         }
     }
 
+    /// True when the checkpoint carries a multi-token-prediction head we can draft with.
+    pub fn has_mtp(&self) -> bool {
+        match self {
+            Net::Cpu(m) => m.has_mtp(),
+            Net::Gpu(_) => false,
+        }
+    }
+
+    pub fn mtp_cache(&self) -> Option<KvCache> {
+        match self {
+            Net::Cpu(m) if m.has_mtp() => Some(m.mtp_cache()),
+            _ => None,
+        }
+    }
+
+    /// One MTP step: logits for the token after `token`, given the main model's hidden state.
+    pub fn mtp_forward(&self, hidden: &[f32], token: u32, pos: usize, cache: &mut KvCache) -> Option<Vec<f32>> {
+        match self {
+            Net::Cpu(m) => m.mtp_forward(hidden, token, pos, cache),
+            Net::Gpu(_) => None,
+        }
+    }
+
+    /// forward_multi that also returns each row's pre-final-norm hidden state (MTP input).
+    pub fn forward_multi_h(&self, items: &[(u32, usize)], caches: &mut [&mut Kv]) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        match self {
+            Net::Cpu(m) => {
+                let mut cs: Vec<&mut KvCache> = caches.iter_mut().map(|k| match &mut **k { Kv::Cpu(c) => c, _ => panic!("mismatch") }).collect();
+                m.forward_multi_all_h(items, &mut cs)
+            }
+            Net::Gpu(_) => (self.forward_multi(items, caches, true), Vec::new()),
+        }
+    }
+
     pub fn forward_multi(&self, items: &[(u32, usize)], caches: &mut [&mut Kv], all_logits: bool) -> Vec<Vec<f32>> {
         match self {
             Net::Cpu(m) => {

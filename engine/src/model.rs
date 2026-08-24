@@ -248,8 +248,22 @@ pub enum Mlp {
     Moe { router: Vec<f32>, experts: Vec<Expert> }, // router: [num_experts, hidden] f32
 }
 
+/// Multi-token prediction head shipped inside Qwen3.5 checkpoints: one transformer layer that
+/// takes (hidden state at position p, embedding of the token at p+1) and predicts the token at
+/// p+2. It costs ~1/64 of a full forward, so it is a free, perfectly-aligned draft model for
+/// speculative decoding. (transformers ignores these weights; the algorithm follows vLLM's
+/// Qwen3NextMultiTokenPredictor.)
+pub struct Mtp {
+    pub(crate) fc: Weight,          // [hidden, 2*hidden]
+    pub(crate) norm_embed: Vec<f32>,
+    pub(crate) norm_hidden: Vec<f32>,
+    pub(crate) layer: Layer,
+    pub(crate) norm: Vec<f32>,
+}
+
 pub struct Model {
     pub config: Config,
+    pub(crate) mtp: Option<Mtp>,
     pub(crate) inv_freq: Vec<f32>, // head_dim/2 rotary frequencies
     pub(crate) embed: Vec<u16>, // [vocab, hidden]
     pub(crate) layers: Vec<Layer>,
@@ -534,7 +548,39 @@ impl Model {
         }
         let rd = config.rotary_dim;
         let inv_freq: Vec<f32> = (0..rd / 2).map(|i| 1.0 / config.rope_theta.powf(2.0 * i as f32 / rd as f32)).collect();
+        // MTP head (optional): same shape as a full-attention layer plus the fc/pre-norms.
+        let mtp = if st.has("mtp.fc.weight") {
+            let p = "mtp.layers.0.";
+            eprintln!("mtp: multi-token prediction head found — available as a self-draft");
+            Some(Mtp {
+                fc: wload("mtp.fc.weight", &quant),
+                norm_embed: norm_w("mtp.pre_fc_norm_embedding.weight"),
+                norm_hidden: norm_w("mtp.pre_fc_norm_hidden.weight"),
+                norm: norm_w("mtp.norm.weight"),
+                layer: Layer {
+                    ln1: norm_w(&format!("{p}input_layernorm.weight")),
+                    attn: Attn::Full {
+                        wq: wload(&format!("{p}self_attn.q_proj.weight"), &quant),
+                        wk: wload(&format!("{p}self_attn.k_proj.weight"), &quant),
+                        wv: wload(&format!("{p}self_attn.v_proj.weight"), &quant),
+                        wo: wload(&format!("{p}self_attn.o_proj.weight"), &quant),
+                        q_norm: norm_w(&format!("{p}self_attn.q_norm.weight")),
+                        k_norm: norm_w(&format!("{p}self_attn.k_norm.weight")),
+                        gate: config.attn_gate,
+                    },
+                    ln2: norm_w(&format!("{p}post_attention_layernorm.weight")),
+                    mlp: Mlp::Dense(Expert {
+                        w_gate: wload(&format!("{p}mlp.gate_proj.weight"), &quant),
+                        w_up: wload(&format!("{p}mlp.up_proj.weight"), &quant),
+                        w_down: wload(&format!("{p}mlp.down_proj.weight"), &quant),
+                    }),
+                },
+            })
+        } else {
+            None
+        };
         let m = Model {
+            mtp,
             inv_freq,
             embed: st.bf16(&format!("{}embed_tokens.weight", config.prefix)),
             norm: norm_w(&format!("{}norm.weight", config.prefix)),
@@ -633,15 +679,23 @@ impl Model {
     /// one sequence) and batched decode efficient (one token each of many sequences).
     /// Returns logits for the last item of each sequence, in order of first appearance.
     pub fn forward_multi(&self, items: &[(u32, usize)], caches: &mut [&mut KvCache]) -> Vec<Vec<f32>> {
-        self.forward_impl(items, caches, false)
+        self.forward_impl(items, caches, false, None)
+    }
+
+    /// Like forward_multi_all, but also returns the pre-final-norm hidden state of each row —
+    /// what the MTP head consumes.
+    pub fn forward_multi_all_h(&self, items: &[(u32, usize)], caches: &mut [&mut KvCache]) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let mut h = Vec::new();
+        let logits = self.forward_impl(items, caches, true, Some(&mut h));
+        (logits, h)
     }
 
     /// Like forward_multi but returns logits for EVERY item (needed to verify draft tokens).
     pub fn forward_multi_all(&self, items: &[(u32, usize)], caches: &mut [&mut KvCache]) -> Vec<Vec<f32>> {
-        self.forward_impl(items, caches, true)
+        self.forward_impl(items, caches, true, None)
     }
 
-    fn forward_impl(&self, items: &[(u32, usize)], caches: &mut [&mut KvCache], all_logits: bool) -> Vec<Vec<f32>> {
+    fn forward_impl(&self, items: &[(u32, usize)], caches: &mut [&mut KvCache], all_logits: bool, hidden_out: Option<&mut Vec<Vec<f32>>>) -> Vec<Vec<f32>> {
         let m = items.len();
         let c = &self.config;
         let (h, hd, kvh) = (c.heads, c.head_dim, c.kv_heads);
@@ -886,7 +940,12 @@ impl Model {
         for (r, &j) in lasts.iter().enumerate() {
             let row = &mut xl[r * c.hidden..(r + 1) * c.hidden];
             row.copy_from_slice(&x[j * c.hidden..(j + 1) * c.hidden]);
-            rmsnorm(row, &self.norm, c.eps);
+        }
+        if let Some(out) = hidden_out {
+            *out = xl.chunks(c.hidden).map(|h| h.to_vec()).collect(); // pre-norm, for the MTP head
+        }
+        for r in 0..lasts.len() {
+            rmsnorm(&mut xl[r * c.hidden..(r + 1) * c.hidden], &self.norm, c.eps);
         }
         let mut logits = vec![0.0; lasts.len() * c.vocab];
         self.lm_head.matmul(&xl, lasts.len(), &mut logits);
@@ -1097,6 +1156,137 @@ pub(crate) fn delta_net(
             }
         }
     });
+}
+
+impl Model {
+    /// Run one token through the MTP head and return logits for the token after next.
+    /// `hidden` is the main model's pre-final-norm state at position `pos - 1`; `token` is the
+    /// token at `pos`. The head keeps its own single-layer KV cache.
+    pub fn mtp_forward(&self, hidden: &[f32], token: u32, pos: usize, cache: &mut KvCache) -> Option<Vec<f32>> {
+        let mtp = self.mtp.as_ref()?;
+        let c = &self.config;
+        let (h, hd, kvh) = (c.heads, c.head_dim, c.kv_heads);
+        let (qd, kd) = (h * hd, kvh * hd);
+        let stride = kd;
+
+        // embedding of `token`, normalized, concatenated with the normalized hidden state
+        let mut cat = vec![0.0f32; 2 * c.hidden];
+        for (d, &b) in self.embed[token as usize * c.hidden..(token as usize + 1) * c.hidden].iter().enumerate() {
+            cat[d] = bf16_to_f32(b);
+        }
+        rmsnorm(&mut cat[..c.hidden], &mtp.norm_embed, c.eps);
+        cat[c.hidden..].copy_from_slice(hidden);
+        rmsnorm(&mut cat[c.hidden..], &mtp.norm_hidden, c.eps);
+        let mut x = vec![0.0f32; c.hidden];
+        mtp.fc.matmul(&cat, 1, &mut x);
+
+        // grow the head's own cache
+        if let LayerCache::Kv { k, v } = &mut cache.layers[0] {
+            let need = (pos + 1) * stride;
+            if k.len() < need {
+                k.resize(need, 0.0);
+                v.resize(need, 0.0);
+            }
+        }
+
+        let half = c.rotary_dim / 2;
+        let mut rcos = vec![0f32; half];
+        let mut rsin = vec![0f32; half];
+        for i in 0..half {
+            let (sn, cs) = (pos as f32 * self.inv_freq[i]).sin_cos();
+            rcos[i] = cs;
+            rsin[i] = sn;
+        }
+
+        let l = &mtp.layer;
+        let mut hn = x.clone();
+        rmsnorm(&mut hn, &l.ln1, c.eps);
+        let (wq, wk, wv, wo, q_norm, k_norm, gate) = match &l.attn {
+            Attn::Full { wq, wk, wv, wo, q_norm, k_norm, gate } => (wq, wk, wv, wo, q_norm, k_norm, *gate),
+            _ => return None,
+        };
+        let qrows = if gate { 2 * qd } else { qd };
+        let qstride = if gate { 2 * hd } else { hd };
+        let mut q = vec![0.0; qrows];
+        let mut k = vec![0.0; kd];
+        let mut v = vec![0.0; kd];
+        wq.matmul(&hn, 1, &mut q);
+        wk.matmul(&hn, 1, &mut k);
+        wv.matmul(&hn, 1, &mut v);
+        for hi in 0..h {
+            let qh = &mut q[hi * qstride..hi * qstride + hd];
+            rmsnorm(qh, q_norm, c.eps);
+            rope_tab(&mut qh[..c.rotary_dim], &rcos, &rsin);
+        }
+        for hi in 0..kvh {
+            let kh = &mut k[hi * hd..(hi + 1) * hd];
+            rmsnorm(kh, k_norm, c.eps);
+            rope_tab(&mut kh[..c.rotary_dim], &rcos, &rsin);
+        }
+        if let LayerCache::Kv { k: ck, v: cv } = &mut cache.layers[0] {
+            ck[pos * stride..(pos + 1) * stride].copy_from_slice(&k);
+            cv[pos * stride..(pos + 1) * stride].copy_from_slice(&v);
+        }
+        let mut attn = vec![0.0; qd];
+        {
+            let mut qg = vec![0.0; qd];
+            for hi in 0..h {
+                qg[hi * hd..(hi + 1) * hd].copy_from_slice(&q[hi * qstride..hi * qstride + hd]);
+            }
+            let (ck, cv) = match &cache.layers[0] {
+                LayerCache::Kv { k, v } => (k, v),
+                _ => return None,
+            };
+            let end = (pos + 1) * stride;
+            attention_multi(&qg, &[(&ck[..end], &cv[..end], pos)], stride, h, kvh, hd, &mut attn);
+        }
+        if gate {
+            for hi in 0..h {
+                for d in 0..hd {
+                    let g = q[hi * qstride + hd + d];
+                    attn[hi * hd + d] *= 1.0 / (1.0 + (-g).exp());
+                }
+            }
+        }
+        let mut o = vec![0.0; c.hidden];
+        wo.matmul(&attn, 1, &mut o);
+        for i in 0..c.hidden {
+            x[i] += o[i];
+        }
+        let mut hn2 = x.clone();
+        rmsnorm(&mut hn2, &l.ln2, c.eps);
+        if let Mlp::Dense(e) = &l.mlp {
+            let mut g = vec![0.0; c.intermediate];
+            let mut u = vec![0.0; c.intermediate];
+            e.w_gate.matmul(&hn2, 1, &mut g);
+            e.w_up.matmul(&hn2, 1, &mut u);
+            for i in 0..c.intermediate {
+                g[i] = silu(g[i]) * u[i];
+            }
+            e.w_down.matmul(&g, 1, &mut o);
+            for i in 0..c.hidden {
+                x[i] += o[i];
+            }
+        }
+        rmsnorm(&mut x, &mtp.norm, c.eps);
+        let mut logits = vec![0.0; c.vocab];
+        self.lm_head.matmul(&x, 1, &mut logits);
+        cache.len = pos + 1;
+        Some(logits)
+    }
+
+    /// A one-layer KV cache for the MTP head.
+    pub fn mtp_cache(&self) -> KvCache {
+        let mut cfg = self.config.clone();
+        cfg.layers = 1;
+        cfg.layer_types = vec![true];
+        cfg.lin = None;
+        KvCache::new(&cfg)
+    }
+
+    pub fn has_mtp(&self) -> bool {
+        self.mtp.is_some()
+    }
 }
 
 /// Temperature + top-p sampling. temperature 0 → greedy.

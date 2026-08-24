@@ -28,6 +28,8 @@ struct Seq {
     req: Request,
     cache: Kv,              // target KV: holds committed[..len-1]; committed.last() is fed next step
     draft_cache: KvCache,   // draft KV, resynced to committed before each draft phase
+    mtp_cache: Option<KvCache>, // single-layer cache for the model's own MTP head
+    hidden: Vec<f32>,       // main model's pre-final-norm state for committed.last()
     committed: Vec<u32>,    // prompt + everything emitted so far
     sampler: Sampler,
     generated: usize,
@@ -125,6 +127,15 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
     let ngram_n: usize = std::env::var("NGRAM_N").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let ngram_k: usize = std::env::var("NGRAM_K").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
     let ngram_on = rollback && std::env::var("NGRAM").map_or(true, |v| v != "0");
+    // MTP self-speculation: how many tokens the head proposes per step (0 disables).
+    let mtp_k: usize = if model.has_mtp() && rollback {
+        std::env::var("MTP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
+    } else {
+        0
+    };
+    if mtp_k > 0 {
+        eprintln!("mtp: self-speculation enabled (MTP_K={mtp_k})");
+    }
     let mut active: Vec<Seq> = Vec::new();
     let mut prefix = PrefixCache::new(if model.device() == "gpu" { 512 } else { 1024 });
     loop {
@@ -156,7 +167,8 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
             let first = sampler.sample(&mut logits);
             let mut committed = req.prompt_ids.clone();
             let draft_cache = match &draft { Some(d) => KvCache::new(&d.config), None => KvCache::new(model.config()) };
-            let mut seq = Seq { req, cache, draft_cache, committed, sampler, generated: 0, batch_sizes: 0, steps: 0, drafted: 0, accepted: 0, ngram_backoff: 0, ngram_hits: 0, ngram_tries: 0 };
+            let mtp_cache = model.mtp_cache();
+            let mut seq = Seq { req, cache, draft_cache, mtp_cache, hidden: Vec::new(), committed, sampler, generated: 0, batch_sizes: 0, steps: 0, drafted: 0, accepted: 0, ngram_backoff: 0, ngram_hits: 0, ngram_tries: 0 };
             if emit(&mut seq, first).is_some() {
                 finish_seq(seq, "stop");
                 continue;
@@ -168,11 +180,44 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
             continue;
         }
 
+        // ---- draft phase 0: the model's own MTP head (cheap and well aligned) ----
+        // One MTP layer costs ~1/64 of a forward pass and was trained to predict the next-next
+        // token, so acceptance is far higher than a separate small draft model.
+        let mut drafts_mtp: Vec<Vec<u32>> = vec![Vec::new(); active.len()];
+        if mtp_k > 0 {
+            for (i, s) in active.iter_mut().enumerate() {
+                if s.hidden.is_empty() || s.mtp_cache.is_none() {
+                    continue;
+                }
+                let mut cache = s.mtp_cache.take().unwrap();
+                let mut tok = *s.committed.last().unwrap();
+                let mut pos = s.committed.len() - 1;
+                let mut hidden = s.hidden.clone();
+                for _ in 0..mtp_k {
+                    match model.mtp_forward(&hidden, tok, pos, &mut cache) {
+                        Some(mut l) => {
+                            let next = greedy(&mut l);
+                            drafts_mtp[i].push(next);
+                            // chained drafting reuses the same hidden state (step > 1 is weaker)
+                            tok = next;
+                            pos += 1;
+                            let _ = &mut hidden;
+                        }
+                        None => break,
+                    }
+                }
+                s.mtp_cache = Some(cache);
+            }
+        }
+
         // ---- draft phase 1: n-gram lookup in the sequence's own tokens (free) ----
-        let mut drafts: Vec<Vec<u32>> = vec![Vec::new(); active.len()];
+        let mut drafts: Vec<Vec<u32>> = drafts_mtp;
         let mut from_ngram = vec![false; active.len()];
         if ngram_on {
             for (i, s) in active.iter_mut().enumerate() {
+                if !drafts[i].is_empty() {
+                    continue; // MTP already proposed for this sequence
+                }
                 if s.ngram_backoff > 0 {
                     s.ngram_backoff -= 1;
                     continue;
@@ -185,7 +230,7 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
             }
         }
         // ---- draft phase 2: draft model for the rest ----
-        let need_model_draft = active.iter().enumerate().any(|(i, _)| !from_ngram[i]);
+        let need_model_draft = active.iter().enumerate().any(|(i, _)| !from_ngram[i] && drafts[i].is_empty());
         if let (Some(d), true) = (&draft, need_model_draft) {
             // resync draft caches to committed[..len-1], then feed the tail (usually 1-2 tokens)
             let mut items = Vec::new();
@@ -204,7 +249,7 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
                 let mut next_items = Vec::new();
                 for (i, l) in dl.iter().enumerate() {
                     let t = (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u32;
-                    if !from_ngram[i] {
+                    if !from_ngram[i] && drafts[i].len() <= round {
                         drafts[i].push(t);
                     }
                     next_items.push((t, i));
@@ -228,7 +273,11 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
         let batch = active.len();
         let mut caches: Vec<&mut Kv> = active.iter_mut().map(|s| &mut s.cache).collect();
         let any_draft = drafts.iter().any(|d| !d.is_empty());
-        let all = model.forward_multi(&items, &mut caches, any_draft);
+        let (all, hiddens) = if mtp_k > 0 {
+            model.forward_multi_h(&items, &mut caches)
+        } else {
+            (model.forward_multi(&items, &mut caches, any_draft), Vec::new())
+        };
 
         // ---- accept/reject per sequence ----
         let mut li = 0;
@@ -259,6 +308,20 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
                 break;
             }
             s.accepted += accepted;
+            // hidden state of the last committed token feeds the next MTP draft
+            if mtp_k > 0 && !hiddens.is_empty() {
+                let row = (li - 1).min(hiddens.len().saturating_sub(1));
+                let taken = accepted.min(k);
+                let idx = (li - (k + 1) + taken).min(hiddens.len().saturating_sub(1));
+                s.hidden = hiddens[idx.min(row)].clone();
+                // the MTP cache only holds positions we actually committed
+                if let Some(c) = s.mtp_cache.as_mut() {
+                    let want = s.committed.len().saturating_sub(1);
+                    if c.len > want {
+                        c.truncate(want);
+                    }
+                }
+            }
             if from_ngram[i] {
                 if accepted == 0 {
                     s.ngram_backoff = 3; // this region of text isn't repeating; don't pay for verification for a while
@@ -320,6 +383,10 @@ fn ngram_draft(toks: &[u32], n: usize, k: usize) -> Option<Vec<u32>> {
         }
     }
     None
+}
+
+fn greedy(l: &mut [f32]) -> u32 {
+    (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u32
 }
 
 fn finish_seq(s: Seq, finish: &'static str) {

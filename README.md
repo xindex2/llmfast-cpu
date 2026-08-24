@@ -76,6 +76,10 @@ cd /opt/llmfast && ./update.sh engines    # also restart the model engines
 | `llmfa.st/app/admin/ui` | admin + customer dashboard |
 | `api.llmfa.st` + `/models` | API and provider document — point OpenRouter here |
 
+Speculative decoding: `MTP_K` (self-speculation with the checkpoint's multi-token-prediction
+head, default 1 when present, 0 disables), `NGRAM`/`NGRAM_N`/`NGRAM_K` (prompt lookup),
+`DRAFT_MODEL`+`SPEC_K` (separate draft model).
+
 Engine env: `DEVICE=auto|cpu|gpu`, `GPU_MEM_MB`, `MAX_CONTEXT`, `QUANT=q8|q4|bf16`, `THREADS`,
 `NGRAM`, `DRAFT_MODEL`+`SPEC_K`, `WCACHE=0` (disable the quantized weight cache), `STATIC`, `PIN`,
 `FORCE_SIMD=0|1|2`, `PROFILE=1`, `LAYER_DEBUG=1`.
