@@ -30,6 +30,20 @@ fn main() {
         run_fixture(&args[i + 1]);
         return;
     }
+    // --trace-ids "1,2,3": forward raw token ids (set LAYER_DEBUG=1 for the per-layer trace)
+    // and print the top-5 next tokens — for diffing against reference implementations.
+    if let Some(i) = args.iter().position(|a| a == "--trace-ids") {
+        let ids: Vec<u32> = args[i + 1].split(',').map(|t| t.trim().parse().unwrap()).collect();
+        let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
+        let model = model::Model::load(&dir);
+        let mut cache = model::KvCache::new(&model.config);
+        let logits = model.forward_batch(&ids, &mut cache);
+        let mut idx: Vec<usize> = (0..logits.len()).collect();
+        idx.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+        let top: Vec<String> = idx[..5].iter().map(|&t| format!("{t}={:?}({:.2})", tokenizer.decode(&[t as u32]), logits[t])).collect();
+        println!("our top5: {}", top.join("  "));
+        return;
+    }
     let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
     if let Some(i) = args.iter().position(|a| a == "--tokenize") {
         let ids = tokenizer.encode(&args[i + 1].replace("\\n", "\n"));

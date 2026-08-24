@@ -643,11 +643,13 @@ impl Model {
             }
             lap(4, &mut tick);
             if layer_debug {
-                let x0 = &x[..c.hidden];
+                // last item's row: comparable to HF's hidden_states[...,-1] on identical ids
+                let x0 = &x[(m - 1) * c.hidden..m * c.hidden];
                 let norm = x0.iter().map(|v| v * v).sum::<f32>().sqrt();
                 let mx = x0.iter().fold(0f32, |a, &b| a.max(b.abs()));
                 let nan = x0.iter().filter(|v| !v.is_finite()).count();
-                eprintln!("layer {li:2} ({}) |x|={norm:10.3} max|x|={mx:9.3} nonfinite={nan}", if c.is_full(li) { "full" } else { "lin " });
+                eprintln!("layer {li:2} ({}) |x|={norm:10.3} max|x|={mx:9.3} nonfinite={nan} first4=[{:.4}, {:.4}, {:.4}, {:.4}]",
+                    if c.is_full(li) { "full" } else { "lin " }, x0[0], x0[1], x0[2], x0[3]);
             }
         }
 
