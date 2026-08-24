@@ -660,9 +660,21 @@ func main() {
 
 	// Serve the built admin UI (admin/dist) at / when ADMIN_DIR is set, so one process = API + admin.
 	if dir := os.Getenv("ADMIN_DIR"); dir != "" {
+		// Vite emits content-hashed asset names, so assets can be cached forever, but index.html
+		// must never be cached: a stale one points at a bundle that no longer exists (blank page
+		// after a deploy, and new pages silently missing until a hard refresh).
 		fs := http.FileServer(http.Dir(dir))
-		mux.Handle("GET /assets/", fs)
-		mux.HandleFunc("GET /admin/ui", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, dir+"/index.html") })
+		mux.Handle("GET /assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			fs.ServeHTTP(w, r)
+		}))
+		index := func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			http.ServeFile(w, r, dir+"/index.html")
+		}
+		mux.HandleFunc("GET /admin/ui", index)
+		mux.HandleFunc("GET /admin/ui/", index) // trailing slash and deep links
 		log.Printf("admin UI at /admin/ui from %s", dir)
 	}
 
