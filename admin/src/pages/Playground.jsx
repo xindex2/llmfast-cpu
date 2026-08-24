@@ -82,6 +82,7 @@ export default function Playground({ session = false }) {
           <span title="Measured by the server. The difference from the number on the left is network latency between you and the box.">
             server-side: {stat.server.ttft_ms.toFixed(0)} ms · {stat.server.tok_per_sec.toFixed(1)} tok/s
             {stat.ttft - stat.server.ttft_ms > 5 && ` (+${(stat.ttft - stat.server.ttft_ms).toFixed(0)} ms network)`}
+            {stat.server.accept_rate > 0 && ` · ${(stat.server.accept_rate * 100).toFixed(0)}% drafts accepted`}
           </span>
         </>}
       </p>}

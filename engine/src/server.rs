@@ -408,7 +408,11 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
     }
     let usage = json!({"prompt_tokens": prompt_ids.len(), "completion_tokens": out_ids.len(), "total_tokens": prompt_ids.len() + out_ids.len(),
         "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
-        "cached_tokens": cached, "prefill_tok_per_sec": (prompt_ids.len() - cached) as f32 / prefill_s.max(1e-6), "decode_tok_per_sec": out_ids.len() as f32 / decode_s.max(1e-6)});
+        "cached_tokens": cached, "prefill_tok_per_sec": (prompt_ids.len() - cached) as f32 / prefill_s.max(1e-6), "decode_tok_per_sec": out_ids.len() as f32 / decode_s.max(1e-6),
+        // Speculation is the one lever that beats the memory ceiling -- it produces several
+        // tokens per pass over the weights -- so its acceptance rate has to be visible from
+        // the dashboard, not just in the engine log where nobody tunes against it.
+        "accept_rate": accept_rate, "batch_avg": batch_avg});
     if streaming {
         if !tool_calls.is_empty() {
             write_sse(stream, &chunk_delta(&id, &model_name, json!({"tool_calls": tool_calls}), None, None));

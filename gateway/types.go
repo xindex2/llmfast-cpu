@@ -50,6 +50,8 @@ type Usage struct {
 	CompletionTokens        int                      `json:"completion_tokens"`
 	TotalTokens             int                      `json:"total_tokens"`
 	CachedTokens            int                      `json:"cached_tokens,omitempty"` // engine reports this flat
+	AcceptRate              float64                  `json:"accept_rate,omitempty"`   // speculative decoding: drafts accepted / drafted
+	BatchAvg                float64                  `json:"batch_avg,omitempty"`     // mean continuous-batch size while this request ran
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 	Timing                  *Timing                  `json:"timing,omitempty"` // ours, not OpenAI's; clients ignore it
@@ -62,6 +64,8 @@ type Timing struct {
 	TTFTms       float64 `json:"ttft_ms"`     // request accepted → first token out of the engine
 	DurationMs   float64 `json:"duration_ms"` // whole request, server side
 	TokPerSec    float64 `json:"tok_per_sec"` // completion tokens / generation time
+	AcceptRate   float64 `json:"accept_rate,omitempty"`
+	BatchAvg     float64 `json:"batch_avg,omitempty"`
 }
 
 type Delta struct {
