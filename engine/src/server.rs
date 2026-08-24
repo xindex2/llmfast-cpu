@@ -271,6 +271,7 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
     let thinking_model = engine.model.config().lin.is_some();
     let mut in_think = thinking_model;
     let mut reasoning = String::new();
+    let mut streamed = 0usize; // bytes of `reasoning` already sent as deltas
     let mut reasoning_tokens = 0usize;
     let mut prefill_s = 0.0f32;
     let mut cached = 0usize;
@@ -299,6 +300,18 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
                 if valid > 0 {
                     let mut text = String::from_utf8_lossy(&pending[..valid]).into_owned();
                     pending.drain(..valid);
+                    // Qwen3 in thinking mode opens the block itself (Qwen3.5 starts inside one
+                    // via the template); either way the tag is protocol, not content.
+                    if !in_think && full.is_empty() && reasoning.is_empty() {
+                        if let Some(i) = text.find("<think>") {
+                            let before = text[..i].to_string();
+                            text = text[i + "<think>".len()..].to_string();
+                            in_think = true;
+                            if !before.trim().is_empty() {
+                                full.push_str(&before);
+                            }
+                        }
+                    }
                     // stop sequences: cut at the first match and end the request
                     let mut hit_stop = false;
                     for st in &stop_strs {
@@ -311,26 +324,49 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
                         }
                     }
                     if in_think {
-                        // the closing tag may arrive split across tokens; buffer on `reasoning`
+                        // Reasoning is streamed incrementally, but the closing tag can arrive
+                        // split across tokens ("</th" + "ink>"). Buffer everything, stream only
+                        // what cannot still turn out to be part of the tag, and never emit the
+                        // tag itself.
                         reasoning.push_str(&text);
                         reasoning_tokens += 1;
-                        if let Some(i) = reasoning.find("</think>") {
-                            let after = reasoning[i + "</think>".len()..].to_string();
-                            reasoning.truncate(i);
-                            in_think = false;
-                            if streaming && !text.is_empty() {
-                                write_sse(stream, &rchunk(text.trim_end()));
+                        const TAG: &str = "</think>";
+                        match reasoning.find(TAG) {
+                            Some(i) => {
+                                let delta = reasoning[streamed..i].to_string();
+                                if streaming && !delta.is_empty() && !write_sse(stream, &rchunk(&delta)) {
+                                    eprintln!("[{id}] client disconnected");
+                                    return;
+                                }
+                                let after = reasoning[i + TAG.len()..].to_string();
+                                reasoning.truncate(i);
+                                streamed = reasoning.len();
+                                in_think = false;
+                                text = after.trim_start().to_string();
+                                if text.is_empty() {
+                                    continue;
+                                }
                             }
-                            text = after.trim_start().to_string();
-                            if text.is_empty() {
+                            None => {
+                                // hold back any suffix that could be the start of the tag
+                                let mut hold = 0;
+                                for n in (1..TAG.len()).rev() {
+                                    if reasoning.len() >= n && reasoning.is_char_boundary(reasoning.len() - n) && reasoning[reasoning.len() - n..] == TAG[..n] {
+                                        hold = n;
+                                        break;
+                                    }
+                                }
+                                let safe = reasoning.len() - hold;
+                                if safe > streamed {
+                                    let delta = reasoning[streamed..safe].to_string();
+                                    streamed = safe;
+                                    if streaming && !write_sse(stream, &rchunk(&delta)) {
+                                        eprintln!("[{id}] client disconnected");
+                                        return;
+                                    }
+                                }
                                 continue;
                             }
-                        } else {
-                            if streaming && !write_sse(stream, &rchunk(&text)) {
-                                eprintln!("[{id}] client disconnected");
-                                return;
-                            }
-                            continue;
                         }
                     }
                     full.push_str(&text);
