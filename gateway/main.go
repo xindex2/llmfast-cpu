@@ -253,6 +253,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			stop = "error"
 		}
 		finalizeUsage(&usage)
+		if he, ok := eng.(*HTTPEngine); ok {
+			if tc := he.LastToolCalls(); len(tc) > 0 {
+				send(ChatChunk{ID: id, Object: "chat.completion.chunk", Created: start.Unix(), Model: req.Model,
+					Choices: []ChunkChoice{{Delta: Delta{ToolCalls: tc}}}})
+				stop = "tool_calls"
+			}
+		}
 		send(ChatChunk{ID: id, Object: "chat.completion.chunk", Created: start.Unix(), Model: req.Model,
 			Choices: []ChunkChoice{{Delta: Delta{}, FinishReason: &stop}}, Usage: &usage})
 		fmt.Fprint(w, "data: [DONE]\n\n")
@@ -280,7 +287,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	finalizeUsage(&usage)
 	writeJSON(w, 200, ChatResponse{ID: id, Object: "chat.completion", Created: start.Unix(), Model: req.Model,
-		Choices: []Choice{{Message: Message{Role: "assistant", Content: full.String(), Reasoning: reasoning.String()}, FinishReason: "stop"}},
+		Choices: []Choice{{Message: msgOut(eng, full.String(), reasoning.String()), FinishReason: finishOf(eng)}},
 		Usage:   usage})
 }
 
@@ -439,7 +446,7 @@ func (s *Server) runBenchmark(ctx context.Context, eng Engine, model string, con
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			req := &ChatRequest{Model: model, MaxTokens: maxTok, Messages: []Message{{Role: "user", Content: prompt}}}
+			req := &ChatRequest{Model: model, MaxTokens: maxTok, Messages: []Message{{Role: "user", Content: jsonString(prompt)}}}
 			t0 := time.Now()
 			var first time.Time
 			u, err := eng.Generate(ctx, req, func(string) {
@@ -473,6 +480,27 @@ func (s *Server) runBenchmark(ctx context.Context, eng Engine, model string, con
 	}
 	b.AggTokPerSec = float64(totalTok) / time.Since(start).Seconds()
 	return b
+}
+
+// msgOut builds the assistant message, attaching tool calls the engine reported.
+func msgOut(eng Engine, content, reasoning string) Message {
+	m := Message{Role: "assistant", Content: jsonString(content), Reasoning: reasoning}
+	if he, ok := eng.(*HTTPEngine); ok {
+		if tc := he.LastToolCalls(); len(tc) > 0 {
+			m.ToolCalls = tc
+			m.Content = nil
+		}
+	}
+	return m
+}
+
+func finishOf(eng Engine) string {
+	if he, ok := eng.(*HTTPEngine); ok {
+		if f := he.LastFinish(); f != "" {
+			return f
+		}
+	}
+	return "stop"
 }
 
 func finalizeUsage(u *Usage) {
@@ -528,12 +556,20 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 				"max_length": map[string]any{"value": m.ContextLength, "unit": "token"},
 				"streaming":  true,
 				"supported_parameters": map[string]any{
-					"temperature": map[string]any{"type": "range", "min": 0, "max": 2},
-					"top_p":       map[string]any{"type": "range", "min": 0, "max": 1},
-					"max_tokens":  map[string]any{"type": "integer", "min": 1, "max": m.ContextLength, "unit": "token"},
-					"stop":        map[string]any{"type": "array", "max_items": 4},
+					"temperature":     map[string]any{"type": "range", "min": 0, "max": 2},
+					"top_p":           map[string]any{"type": "range", "min": 0, "max": 1},
+					"max_tokens":      map[string]any{"type": "integer", "min": 1, "max": m.ContextLength, "unit": "token"},
+					"stop":            map[string]any{"type": "array", "max_items": 4},
+					"tools":           map[string]any{"type": "boolean"},
+					"tool_choice":     map[string]any{"type": "enum", "values": []string{"auto", "none", "required"}},
+					"response_format": map[string]any{"type": "enum", "values": []string{"text", "json_object"}},
+					"reasoning":       map[string]any{"type": "boolean"},
 				},
-				"pricing":  []map[string]any{{"type": "completion", "unit": "token", "cost_usd": price(m.OutputPrice)}},
+				"pricing": []map[string]any{
+					{"type": "completion", "unit": "token", "cost_usd": price(m.OutputPrice)},
+					// thinking models emit reasoning tokens; billed at the completion rate
+					{"type": "internal_reasoning", "unit": "token", "cost_usd": price(m.OutputPrice)},
+				},
 				"capacity": []map[string]any{{"type": "completion", "unit": "token", "per": "minute", "value": envInt("CAP_COMPLETION_TPM", 60000)}},
 			}},
 			"capacity":    []map[string]any{{"type": "request", "unit": "request", "per": "minute", "value": envInt("CAP_RPM", 600)}, {"type": "concurrency", "unit": "request", "value": s.maxInflight}},

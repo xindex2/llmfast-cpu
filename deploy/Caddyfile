@@ -1,10 +1,42 @@
-# Caddy terminates TLS for api.llmfa.st (automatic Let's Encrypt) and proxies to the gateway.
+# TLS + routing for llmfa.st. Caddy gets certificates automatically.
+#
+# Layout:
+#   llmfa.st           → the marketing site (static files from site/)
+#   llmfa.st/v1/*      → the API, so customers can use https://llmfa.st/v1 as their base URL
+#   llmfa.st/models    → the OpenRouter provider document
+#   llmfa.st/app       → the admin + customer dashboard
+#   api.llmfa.st       → the same API on its own hostname (what OpenRouter is pointed at)
+
+llmfa.st, www.llmfa.st {
+	encode zstd gzip
+
+	@api path /v1/* /models /auth/* /account/* /admin/*
+	handle @api {
+		reverse_proxy localhost:8080 {
+			flush_interval -1
+			transport http {
+				read_timeout 10m
+			}
+		}
+	}
+
+	handle_path /app* {
+		reverse_proxy localhost:8080
+	}
+
+	handle {
+		root * /opt/forge/site
+		try_files {path} {path}.html /index.html
+		file_server
+	}
+}
+
 api.llmfa.st {
-    reverse_proxy localhost:8080 {
-        flush_interval -1      # stream SSE tokens immediately
-        transport http {
-            read_timeout 10m   # long generations
-        }
-    }
-    encode zstd gzip
+	encode zstd gzip
+	reverse_proxy localhost:8080 {
+		flush_interval -1      # stream SSE tokens immediately
+		transport http {
+			read_timeout 10m   # long generations
+		}
+	}
 }

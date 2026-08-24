@@ -1,22 +1,33 @@
-/* llmfa.st house style: warm off-white paper, black ink, one blue accent, generous type. */
+/* Admin styling — same design tokens as the llmfa.st site (see site/style.css):
+ * paper background with a faint grain, ink text, blue-biro accent, Caveat for the
+ * hand-written annotations. Keep these in sync if the site palette changes. */
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&display=swap');
+
 :root {
-  --bg: #f7f6f3; --panel: #fffefb; --ink: #14130f; --muted: #6b6862; --line: #e3e0d8;
-  --accent: #2f6df6; --accent-soft: #eaf0ff; --green: #17864b; --red: #c8341f; --amber: #a76a12;
-  --radius: 14px;
-  font-family: ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  --bg: #faf9f5; --panel: #ffffff; --ink: #1c1b19; --ink-soft: #4a4842; --muted: #78746b;
+  --line: #ded9cc; --accent: #2f5aa8; --accent-soft: #e9eef8; --marker: #ffd96b;
+  --green: #2b7a4b; --red: #c8503c; --amber: #a76a12;
+  --radius: 12px;
+  --hand: 'Caveat', 'Bradley Hand', 'Segoe Print', cursive;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif;
   color-scheme: light;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); -webkit-font-smoothing: antialiased; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink); -webkit-font-smoothing: antialiased;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+}
+.hand { font-family: var(--hand); font-size: 1.25em; color: var(--accent); }
+.mark { background: linear-gradient(transparent 62%, var(--marker) 62%); padding: 0 2px; }
 a { color: var(--accent); }
 
 .app { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
-nav { padding: 26px 16px; border-right: 1px solid var(--line); background: var(--panel); }
+nav { padding: 26px 16px; border-right: 1px solid var(--line); background: transparent; }
 nav .brand { display: flex; align-items: center; gap: 8px; font-size: 19px; font-weight: 700; margin: 0 8px 26px; letter-spacing: -0.02em; }
 nav .brand .bolt { color: var(--accent); }
 nav button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--muted);
   padding: 9px 12px; border-radius: 10px; cursor: pointer; font-size: 14.5px; font-family: inherit; }
-nav button:hover { background: #f1efe9; color: var(--ink); }
+nav button:hover { background: #f2f0e9; color: var(--ink); }
 nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 nav .who { margin: 20px 8px 0; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 
@@ -57,10 +68,10 @@ button.danger { background: var(--red); color: #fff; border: 0; border-radius: 1
 .msg .think { color: var(--muted); font-size: 13px; border-left: 2px solid var(--line); padding-left: 10px; margin-bottom: 10px; white-space: pre-wrap; }
 
 .ok { color: var(--green); } .bad { color: var(--red); } .warn { color: var(--amber); } .muted { color: var(--muted); }
-code { background: #f1efe9; padding: 2px 6px; border-radius: 5px; font-size: 12.5px; }
-.pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: #f1efe9; color: var(--muted); }
-.pill.ok { background: #e7f6ed; color: var(--green); }
-.pill.bad { background: #fdecea; color: var(--red); }
+code { background: #f2f0e9; padding: 2px 6px; border-radius: 5px; font-size: 12.5px; }
+.pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: #f2f0e9; color: var(--muted); }
+.pill.ok { background: #e4f2e9; color: var(--green); }
+.pill.bad { background: #fbeae6; color: var(--red); }
 
 .auth { max-width: 380px; margin: 12vh auto; }
 .auth .card { padding: 26px; }

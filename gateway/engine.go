@@ -18,17 +18,23 @@ type Engine interface {
 	// Generate streams tokens for a request. It must call emit for every token and return
 	// prompt/completion token counts. Cancelling ctx aborts generation.
 	Generate(ctx context.Context, req *ChatRequest, emit func(token string), emitReasoning func(text string)) (Usage, error)
+	// Tool calls and finish reason from the last Generate call (engine-reported).
 	Healthy() bool
 }
 
 // ---------- http engine: forwards to any OpenAI-compatible engine (our Rust engine) ----------
 
 type HTTPEngine struct {
-	url    string
-	client *http.Client
-	model  string
-	device string
+	url        string
+	client     *http.Client
+	model      string
+	device     string
+	lastTools  []ToolCall
+	lastFinish string
 }
+
+func (h *HTTPEngine) LastToolCalls() []ToolCall { return h.lastTools }
+func (h *HTTPEngine) LastFinish() string        { return h.lastFinish }
 
 func NewHTTPEngine(url string) *HTTPEngine {
 	return &HTTPEngine{url: strings.TrimRight(url, "/"), client: &http.Client{Timeout: 10 * time.Minute}}
@@ -84,6 +90,8 @@ func (h *HTTPEngine) Generate(ctx context.Context, req *ChatRequest, emit func(s
 	}
 	var usage Usage
 	completion := 0
+	h.lastTools = nil
+	h.lastFinish = ""
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -103,6 +111,12 @@ func (h *HTTPEngine) Generate(ctx context.Context, req *ChatRequest, emit func(s
 			usage = *chunk.Usage
 		}
 		for _, ch := range chunk.Choices {
+			if len(ch.Delta.ToolCalls) > 0 {
+				h.lastTools = ch.Delta.ToolCalls
+			}
+			if ch.FinishReason != nil && *ch.FinishReason != "" {
+				h.lastFinish = *ch.FinishReason
+			}
 			if ch.Delta.Reasoning != "" {
 				emitReasoning(ch.Delta.Reasoning)
 			}

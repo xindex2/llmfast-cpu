@@ -4,10 +4,19 @@ import "encoding/json"
 
 // OpenAI-compatible wire types. OpenRouter speaks exactly this shape to providers.
 
+type ToolCall struct {
+	ID       string          `json:"id"`
+	Type     string          `json:"type"`
+	Function json.RawMessage `json:"function"`
+}
+
 type Message struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Reasoning string `json:"reasoning,omitempty"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content,omitempty"` // string, null (tool calls), or content parts
+	Reasoning  string          `json:"reasoning,omitempty"`
+	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
 }
 
 type StreamOptions struct {
@@ -15,14 +24,17 @@ type StreamOptions struct {
 }
 
 type ChatRequest struct {
-	Model         string          `json:"model"`
-	Messages      []Message       `json:"messages"`
-	Stream        bool            `json:"stream"`
-	StreamOptions *StreamOptions  `json:"stream_options,omitempty"`
-	MaxTokens     int             `json:"max_tokens,omitempty"`
-	Temperature   *float64        `json:"temperature,omitempty"`
-	TopP          *float64        `json:"top_p,omitempty"`
-	Stop          json.RawMessage `json:"stop,omitempty"` // string or []string, passed through
+	Model          string          `json:"model"`
+	Messages       []Message       `json:"messages"`
+	Stream         bool            `json:"stream"`
+	StreamOptions  *StreamOptions  `json:"stream_options,omitempty"`
+	MaxTokens      int             `json:"max_tokens,omitempty"`
+	Temperature    *float64        `json:"temperature,omitempty"`
+	TopP           *float64        `json:"top_p,omitempty"`
+	Stop           json.RawMessage `json:"stop,omitempty"`  // string or []string, passed through
+	Tools          json.RawMessage `json:"tools,omitempty"` // OpenAI function specs, passed through
+	ToolChoice     json.RawMessage `json:"tool_choice,omitempty"`
+	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
 }
 
 type PromptTokensDetails struct {
@@ -43,9 +55,10 @@ type Usage struct {
 }
 
 type Delta struct {
-	Role      string `json:"role,omitempty"`
-	Content   string `json:"content,omitempty"`
-	Reasoning string `json:"reasoning,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	Reasoning string     `json:"reasoning,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ChunkChoice struct {
@@ -67,6 +80,12 @@ type Choice struct {
 	Index        int     `json:"index"`
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
+}
+
+// jsonString wraps a plain string as a JSON message content value.
+func jsonString(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return b
 }
 
 type ChatResponse struct {

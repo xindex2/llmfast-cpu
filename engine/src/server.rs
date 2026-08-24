@@ -83,12 +83,56 @@ fn handle(mut stream: TcpStream, engine: &Engine) {
 /// Qwen3: non-thinking mode closes an empty think block. Qwen3.5 hybrids are ALWAYS-thinking:
 /// their template ends with an OPEN <think>\n and the model closes it itself — feeding a closed
 /// block puts the model out of distribution (garbage output).
-fn build_prompt(engine: &Engine, messages: &[Value]) -> String {
+///
+/// Tools follow the Hermes/Qwen convention: signatures go in the system turn inside <tools>,
+/// the model answers with <tool_call>{"name":…,"arguments":{…}}</tool_call>, and results come
+/// back as user turns wrapped in <tool_response>.
+fn build_prompt(engine: &Engine, messages: &[Value], tools: &[Value], json_mode: bool) -> String {
     let mut p = String::new();
-    for m in messages {
+    let mut msgs: Vec<Value> = messages.to_vec();
+
+    if !tools.is_empty() || json_mode {
+        let mut extra = String::new();
+        if !tools.is_empty() {
+            extra.push_str("\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n");
+            for t in tools {
+                extra.push_str(&t.to_string());
+                extra.push('\n');
+            }
+            extra.push_str("</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>");
+        }
+        if json_mode {
+            extra.push_str("\n\nRespond with a single valid JSON object and nothing else.");
+        }
+        // Append to an existing system turn, or insert one.
+        match msgs.iter_mut().find(|m| m["role"] == "system") {
+            Some(sys) => {
+                let base = sys["content"].as_str().unwrap_or("").to_string();
+                sys["content"] = json!(format!("{base}{extra}"));
+            }
+            None => msgs.insert(0, json!({"role": "system", "content": format!("You are a helpful assistant.{extra}")})),
+        }
+    }
+
+    for m in &msgs {
         let role = m["role"].as_str().unwrap_or("user");
         let content = m["content"].as_str().unwrap_or("");
-        p.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+        match role {
+            // tool results are user turns in this template
+            "tool" => p.push_str(&format!("<|im_start|>user\n<tool_response>\n{content}\n</tool_response><|im_end|>\n")),
+            "assistant" => {
+                let mut body = content.to_string();
+                if let Some(calls) = m["tool_calls"].as_array() {
+                    for c in calls {
+                        let f = &c["function"];
+                        body.push_str(&format!("\n<tool_call>\n{{\"name\": {}, \"arguments\": {}}}\n</tool_call>",
+                            f["name"], f["arguments"].as_str().map(|a| a.to_string()).unwrap_or_else(|| f["arguments"].to_string())));
+                    }
+                }
+                p.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", body.trim_start()));
+            }
+            _ => p.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n")),
+        }
     }
     p.push_str("<|im_start|>assistant\n");
     if engine.model.config().lin.is_some() {
@@ -97,6 +141,45 @@ fn build_prompt(engine: &Engine, messages: &[Value]) -> String {
         p.push_str("<think>\n\n</think>\n\n");
     }
     p
+}
+
+/// json_object mode: models like to wrap JSON in ```json fences; callers want raw JSON.
+fn strip_code_fence(t: &str) -> String {
+    let t = t.trim();
+    let inner = match t.strip_prefix("```json").or_else(|| t.strip_prefix("```")) {
+        Some(rest) => rest.trim_start_matches('\n').rsplit_once("```").map(|(a, _)| a).unwrap_or(rest),
+        None => t,
+    };
+    inner.trim().to_string()
+}
+
+/// Extract <tool_call>{...}</tool_call> blocks; returns (clean text, OpenAI-shaped tool_calls).
+fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
+    let mut clean = String::new();
+    let mut calls = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<tool_call>") {
+        clean.push_str(&rest[..i]);
+        let after = &rest[i + "<tool_call>".len()..];
+        let (body, tail) = match after.find("</tool_call>") {
+            Some(j) => (&after[..j], &after[j + "</tool_call>".len()..]),
+            None => (after, ""),
+        };
+        if let Ok(v) = serde_json::from_str::<Value>(body.trim()) {
+            let args = match &v["arguments"] {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            calls.push(json!({
+                "id": format!("call_{}", calls.len()),
+                "type": "function",
+                "function": {"name": v["name"].as_str().unwrap_or(""), "arguments": args}
+            }));
+        }
+        rest = tail;
+    }
+    clean.push_str(rest);
+    (clean.trim().to_string(), calls)
 }
 
 fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
@@ -113,7 +196,9 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
     let id = format!("chatcmpl-{}", engine.counter.fetch_add(1, Ordering::Relaxed));
     let model_name = engine.model_name.clone();
 
-    let prompt = build_prompt(engine, &messages);
+    let tools: Vec<Value> = req["tools"].as_array().cloned().unwrap_or_default();
+    let json_mode = req["response_format"]["type"].as_str() == Some("json_object");
+    let prompt = build_prompt(engine, &messages, &tools, json_mode);
     let prompt_ids = engine.tokenizer.encode(&prompt);
     let cfg = engine.model.config();
     if prompt_ids.len() + 1 >= cfg.max_context {
@@ -241,14 +326,28 @@ fn chat(stream: &mut TcpStream, engine: &Engine, req: &Value) {
         out_ids.len(), decode_s, out_ids.len() as f32 / decode_s.max(1e-6), batch_avg, accept_rate * 100.0
     );
 
+    let (mut clean, tool_calls) = if tools.is_empty() { (full.clone(), Vec::new()) } else { parse_tool_calls(&full) };
+    if json_mode {
+        clean = strip_code_fence(&clean);
+    }
+    if !tool_calls.is_empty() {
+        finish = "tool_calls";
+    }
     let usage = json!({"prompt_tokens": prompt_ids.len(), "completion_tokens": out_ids.len(), "total_tokens": prompt_ids.len() + out_ids.len(),
         "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "cached_tokens": cached, "prefill_tok_per_sec": (prompt_ids.len() - cached) as f32 / prefill_s.max(1e-6), "decode_tok_per_sec": out_ids.len() as f32 / decode_s.max(1e-6)});
     if streaming {
+        if !tool_calls.is_empty() {
+            write_sse(stream, &chunk_delta(&id, &model_name, json!({"tool_calls": tool_calls}), None, None));
+        }
         write_sse(stream, &chunk("", Some(finish), Some(usage)));
         let _ = write!(stream, "{:x}\r\ndata: [DONE]\n\n\r\n0\r\n\r\n", "data: [DONE]\n\n".len());
     } else {
-        let mut msg = json!({"role": "assistant", "content": full});
+        let mut msg = json!({"role": "assistant", "content": clean});
+        if !tool_calls.is_empty() {
+            msg["tool_calls"] = json!(tool_calls);
+            msg["content"] = Value::Null;
+        }
         if !reasoning.trim().is_empty() {
             msg["reasoning"] = json!(reasoning.trim());
         }

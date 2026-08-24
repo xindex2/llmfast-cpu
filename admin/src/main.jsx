@@ -9,8 +9,9 @@ import Settings from './pages/Settings'
 import Models from './pages/Models'
 import Users from './pages/Users'
 import Account from './pages/Account'
+import Launch from './pages/Launch'
 
-const pages = { Dashboard, Playground, Models, Benchmarks, Earnings, Users, Account, Settings }
+const pages = { Dashboard, Playground, Models, Benchmarks, Earnings, Users, Account, Launch, Settings }
 
 function App() {
   const [page, setPage] = useState('Dashboard')
