@@ -13,6 +13,7 @@ pub struct Tokenizer {
     byte_to_char: [char; 256],
     char_to_byte: HashMap<char, u8>,
     specials: Vec<(String, u32)>,
+    #[allow(dead_code)] // half of the im_start/im_end pair; kept so the API is not lopsided
     pub im_start: u32,
     pub im_end: u32,
     pub eos: u32,

@@ -21,11 +21,25 @@ mod tokenizer;
 use std::sync::Arc;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    // The kernel benchmarks synthesise their own matrices; requiring MODEL for them meant
+    // pointing --bench at a checkpoint that it never opens.
+    if args.iter().any(|a| a == "--bench") {
+        bench();
+        return;
+    }
+    if args.iter().any(|a| a == "--gpu-bench") {
+        match gpu::Gpu::init() {
+            Some(g) => gpu::bench(&g),
+            None => eprintln!("no GPU adapter found"),
+        }
+        return;
+    }
+
     let dir = std::env::var("MODEL").expect("set MODEL=<checkpoint dir with config.json, model.safetensors, tokenizer.json>");
     let name = std::env::var("MODEL_NAME").unwrap_or_else(|_| std::path::Path::new(&dir).file_name().unwrap().to_string_lossy().into_owned());
     let think = std::env::var("THINK").map_or(false, |v| v == "1");
 
-    let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--fixture") {
         run_fixture(&args[i + 1]);
         return;
@@ -51,17 +65,6 @@ fn main() {
         println!("{:?}", tokenizer.decode(&ids));
         return;
     }
-    if args.iter().any(|a| a == "--bench") {
-        bench();
-        return;
-    }
-    if args.iter().any(|a| a == "--gpu-bench") {
-        match gpu::Gpu::init() {
-            Some(g) => gpu::bench(&g),
-            None => eprintln!("no GPU adapter found"),
-        }
-        return;
-    }
     // --gpu-check and --prompt need the model synchronously; serving loads it in the background.
     let oneshot = args.iter().any(|a| a == "--gpu-check") || args.iter().any(|a| a == "--prompt");
     if oneshot {
@@ -84,7 +87,7 @@ fn main() {
             eprintln!("prefill {} tok: cpu {:.3}s gpu {:.3}s | logits max abs err {maxerr:.4} | argmax cpu {argc} gpu {argg} ({:?})", toks.len(), cpu_s, gpu_s, tokenizer.decode(&[argg as u32]));
             // decode a few tokens on each and compare
             let (mut tc, mut tg) = (argc as u32, argg as u32);
-            let mut same = 0;
+            let same = 0;
             let t = std::time::Instant::now();
             for _ in 0..20 {
                 let lc = model.forward(tc, &mut cc);
@@ -141,12 +144,6 @@ fn main() {
 
 /// CPU or GPU for a loaded model: DEVICE=auto|cpu|gpu, with GPU_MEM_MB deciding what "fits".
 fn build_net(model: model::Model) -> backend::Net {
-    // Optional draft model for speculative decoding (same tokenizer family required).
-    let draft = std::env::var("DRAFT_MODEL").ok().map(|d| {
-        let q = std::env::var("DRAFT_QUANT").unwrap_or_else(|_| "q8".into());
-        eprintln!("draft model: {d} ({q})");
-        model::Model::load_with(&d, &q)
-    });
     // DEVICE=auto (default): use a GPU if one is present and the model fits; cpu | gpu to force.
     let want = std::env::var("DEVICE").unwrap_or_else(|_| "auto".into());
     // auto: only move to the GPU when the weights fit comfortably (GPU_MEM_MB, default 2048 → models < 1 GB).
@@ -181,9 +178,7 @@ fn build_net(model: model::Model) -> backend::Net {
     } else {
         backend::Net::Cpu(Arc::new(model))
     };
-    eprintln!("device: {}", net.device());
     net
-
 }
 
 /// Generate to stdout without HTTP — the quickest way to check the model is producing sense.
@@ -245,8 +240,49 @@ fn cli(engine: &server::Engine, prompt: &str) {
 }
 
 /// Raw kernel throughput on typical Qwen3 shapes, independent of the model.
+
+/// Decode-shaped benchmark on a matrix far larger than L3, which is the only way to see
+/// memory placement. The 3072x1024 matrices below are ~6 MB and sit in cache on a Xeon, so
+/// they measure the kernel and hide the interconnect. This one measures the memory system:
+/// on a two-socket box, compare `NUMA=1` (default) against `NUMA=0`.
+fn bench_stream() {
+    use std::time::Instant;
+    let (n, k) = (8192usize, 8192usize);
+    let w: Vec<u16> = (0..n * k).map(|i| (((i * 2654435761usize) >> 11) % 4001) as u16 + 15000).collect();
+    let x: Vec<f32> = (0..k).map(|i| (i % 17) as f32 * 0.01).collect();
+    let mut y = vec![0f32; n];
+    for (name, run) in [
+        ("q8", Box::new({
+            let q = kernels::QMat::from_bf16(&w, n, k);
+            move |x: &[f32], y: &mut [f32]| kernels::matvec_q8(&q, x, y)
+        }) as Box<dyn Fn(&[f32], &mut [f32])>),
+        ("q4", Box::new({
+            let q = kernels::Q4Mat::from_bf16(&w, n, k);
+            move |x: &[f32], y: &mut [f32]| kernels::matvec_q4(&q, x, y)
+        })),
+    ] {
+        let bytes = if name == "q8" { n * k + n * k / 32 * 4 } else { n * k / 2 + n * k / 32 * 4 };
+        run(&x, &mut y);
+        let iters = 30;
+        let t = Instant::now();
+        for _ in 0..iters {
+            run(&x, &mut y);
+        }
+        let dt = t.elapsed().as_secs_f64() / iters as f64;
+        eprintln!(
+            "matvec_{name} {n}x{k} ({:.0} MB, exceeds L3): {:.2} ms  {:.1} GB/s  -> {:.1} tok/s for a model of this size",
+            bytes as f64 / 1e6,
+            dt * 1e3,
+            bytes as f64 / dt / 1e9,
+            1.0 / dt,
+        );
+    }
+    eprintln!("  (dual-socket: compare against NUMA=0 — the gap is remote-memory traffic)");
+}
+
 fn bench() {
     use std::time::Instant;
+    bench_stream();
     let (n, k) = (3072, 1024);
     let w: Vec<u16> = (0..n * k).map(|i| ((((i * 2654435761usize) >> 13) % 2001) as f32 / 1000.0 - 1.0).to_bits() as u32 >> 16).map(|b| b as u16).collect();
     let mut y = vec![0f32; n];

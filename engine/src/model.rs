@@ -78,29 +78,28 @@ impl Weight {
     }
 
     fn from_cache(kind: &str, n: usize, k: usize, b: &[u8]) -> Weight {
-        fn to_vec<T: Copy>(b: &[u8]) -> Vec<T> {
-            let n = b.len() / std::mem::size_of::<T>();
-            let mut v: Vec<T> = Vec::with_capacity(n);
-            unsafe {
-                std::ptr::copy_nonoverlapping(b.as_ptr(), v.as_mut_ptr() as *mut u8, b.len());
-                v.set_len(n);
-            }
-            v
-        }
+        // copy_rows, not a plain memcpy: each pool worker copies the rows it will later
+        // multiply, so first-touch puts those pages on its own NUMA node. A single-threaded
+        // copy here parks every weight on node 0 and makes half a two-socket box read
+        // remotely for the life of the process.
+        use crate::kernels::copy_rows as to_vec;
         match kind {
             "q8" => {
                 let (q, sc) = b.split_at(n * k);
-                Weight::Q8(QMat { n, k, q: to_vec(q), scales: to_vec(sc) })
+                Weight::Q8(QMat { n, k, q: to_vec(q, n), scales: to_vec(sc, n) })
             }
             "q4" => {
                 let (q, sc) = b.split_at(n * k / 2);
-                Weight::Q4(Q4Mat { n, k, q: to_vec(q), scales: to_vec(sc) })
+                Weight::Q4(Q4Mat { n, k, q: to_vec(q, n), scales: to_vec(sc, n) })
             }
-            _ => Weight::Bf16 { w: to_vec(b), n, k },
+            _ => Weight::Bf16 { w: to_vec(b, n), n, k },
         }
     }
 
     #[inline]
+    /// Single-token product. The hot paths call the kernels directly; kept as the one place
+    /// that spells out the dispatch for every weight format.
+    #[allow(dead_code)]
     pub fn matvec(&self, x: &[f32], y: &mut [f32]) {
         match self {
             Weight::Bf16 { w, n, k } => matvec_bf16(w, x, *n, *k, y),

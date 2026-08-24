@@ -27,6 +27,9 @@ fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
+// wgpu::Buffer owns its GPU allocation: these are read by the shaders through bind groups,
+// not by Rust, and dropping them would free memory the pipeline still binds.
+#[allow(dead_code)]
 struct GLayer {
     ln1: wgpu::Buffer,
     ln2: wgpu::Buffer,
@@ -63,6 +66,7 @@ struct Pipelines {
     kv_store_l: wgpu::BindGroupLayout,
 }
 
+#[allow(dead_code)] // same: buffers kept alive for the bind groups that reference them
 pub struct GpuModel {
     pub config: Config,
     gpu: Arc<Gpu>,

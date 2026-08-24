@@ -7,7 +7,90 @@ pub fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }
 
-const ROWS_PER_CHUNK: usize = 16;
+pub const ROWS_PER_CHUNK: usize = 16;
+
+// ---------- NUMA-aware weight allocation ----------
+//
+// Linux places a page on the node of the thread that *first writes* it. Every weight buffer
+// used to be filled by whichever thread was loading the model, so on a two-socket box all the
+// weights landed on node 0 and half the workers streamed them over the interconnect for the
+// life of the process. Decode is pure streaming, so it paid that penalty on every token.
+//
+// These two helpers hand each pool worker the rows it will later compute -- the same
+// chunk->worker mapping `run_static` uses in every matvec -- so the first write to a page comes
+// from the node that will read it. NUMA=0 restores the old single-threaded fill for A/B runs.
+
+struct SendBytes(*mut u8);
+unsafe impl Send for SendBytes {}
+unsafe impl Sync for SendBytes {}
+impl SendBytes {
+    #[inline]
+    fn get(&self) -> *mut u8 {
+        self.0
+    }
+}
+
+struct SrcBytes(*const u8);
+unsafe impl Send for SrcBytes {}
+unsafe impl Sync for SrcBytes {}
+impl SrcBytes {
+    #[inline]
+    fn get(&self) -> *const u8 {
+        self.0
+    }
+}
+
+fn numa_placement() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NUMA").map_or(true, |v| v != "0"))
+}
+
+/// Split `bytes` of a row-major buffer into the same row chunks the kernels use, and run `f`
+/// on each chunk from the worker that will own those rows. Returns false when the buffer
+/// cannot be split by rows (or placement is off), so callers fall back to a serial fill.
+fn per_owner_rows(bytes: usize, rows: usize, f: impl Fn(usize, usize) + Sync) -> bool {
+    if !numa_placement() || rows == 0 || bytes == 0 || bytes % rows != 0 {
+        return false;
+    }
+    let row_bytes = bytes / rows;
+    let chunks = (rows + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
+    pool::global().run_static(chunks, &|c| {
+        let r0 = c * ROWS_PER_CHUNK;
+        let r1 = (r0 + ROWS_PER_CHUNK).min(rows);
+        f(r0 * row_bytes, (r1 - r0) * row_bytes);
+    });
+    true
+}
+
+/// A zeroed `Vec<T>` of `elems` elements whose pages are first touched by the workers that
+/// will own those rows. Use instead of `vec![zero; elems]` for anything the kernels stream.
+pub fn alloc_rows<T: Copy>(elems: usize, rows: usize) -> Vec<T> {
+    let mut v: Vec<T> = Vec::with_capacity(elems);
+    let bytes = elems * std::mem::size_of::<T>();
+    let p = SendBytes(v.as_mut_ptr() as *mut u8);
+    if !per_owner_rows(bytes, rows, |off, len| unsafe { std::ptr::write_bytes(p.get().add(off), 0, len) }) {
+        unsafe { std::ptr::write_bytes(p.get(), 0, bytes) };
+    }
+    unsafe { v.set_len(elems) };
+    v
+}
+
+/// `src` copied into a fresh `Vec<T>`, each row chunk copied by the worker that will own it.
+pub fn copy_rows<T: Copy>(src: &[u8], rows: usize) -> Vec<T> {
+    let elems = src.len() / std::mem::size_of::<T>();
+    let mut v: Vec<T> = Vec::with_capacity(elems);
+    let p = SendBytes(v.as_mut_ptr() as *mut u8);
+    let sp = SrcBytes(src.as_ptr());
+    if !per_owner_rows(src.len(), rows, |off, len| unsafe {
+        std::ptr::copy_nonoverlapping(sp.get().add(off), p.get().add(off), len)
+    }) {
+        unsafe { std::ptr::copy_nonoverlapping(sp.get(), p.get(), src.len()) };
+    }
+    unsafe { v.set_len(elems) };
+    v
+}
+
 
 /// y = W · x   (W: [n, k] bf16 row-major, x: f32[k]).  Decode hot path: bandwidth-bound.
 pub fn matvec_bf16(w: &[u16], x: &[f32], n: usize, k: usize, y: &mut [f32]) {
@@ -757,8 +840,8 @@ impl QMat {
         assert_eq!(w.len(), n * k);
         assert_eq!(k % QBLOCK, 0, "k must be a multiple of {QBLOCK}");
         let blocks = k / QBLOCK;
-        let mut q = vec![0i8; n * k];
-        let mut scales = vec![0f32; n * blocks];
+        let mut q: Vec<i8> = alloc_rows(n * k, n);
+        let mut scales: Vec<f32> = alloc_rows(n * blocks, n);
         let qp = SendPtr(q.as_mut_ptr() as *mut f32); // reinterpreted below; only used for address math
         let sp = SendPtr(scales.as_mut_ptr());
         pool::global().run_static((n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK, &|c| {
@@ -914,8 +997,8 @@ impl Q4Mat {
         assert_eq!(w.len(), n * k);
         assert_eq!(k % QBLOCK, 0);
         let blocks = k / QBLOCK;
-        let mut q = vec![0u8; n * k / 2];
-        let mut scales = vec![0f32; n * blocks];
+        let mut q: Vec<u8> = alloc_rows(n * k / 2, n);
+        let mut scales: Vec<f32> = alloc_rows(n * blocks, n);
         let qp = SendPtr(q.as_mut_ptr() as *mut f32);
         let sp = SendPtr(scales.as_mut_ptr());
         pool::global().run_static((n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK, &|c| {
@@ -1240,6 +1323,8 @@ pub fn rope_tab(v: &mut [f32], cos: &[f32], sin: &[f32]) {
 }
 
 /// Rotary embedding, HF "rotate_half" layout: pairs (i, i + d/2).
+/// Reference RoPE, kept as the readable statement of what the fused paths implement.
+#[allow(dead_code)]
 pub fn rope(v: &mut [f32], pos: usize, theta: f32) {
     let d = v.len();
     let half = d / 2;
@@ -1254,6 +1339,59 @@ pub fn rope(v: &mut [f32], pos: usize, theta: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    // Placement must never change contents: these run over sizes that cross the row-chunk
+    // boundary and sizes that cannot be split by rows at all (the serial fallback).
+    #[test]
+    fn copy_rows_matches_memcpy() {
+        for (rows, row_bytes) in [(1usize, 7usize), (16, 4), (17, 64), (129, 96), (64, 4096)] {
+            let src: Vec<u8> = (0..rows * row_bytes).map(|i| (i * 31 % 251) as u8).collect();
+            let got: Vec<u8> = super::copy_rows(&src, rows);
+            assert_eq!(got, src, "rows={rows} row_bytes={row_bytes}");
+            // A row count the buffer does not divide by falls back to a plain copy.
+            let odd: Vec<u8> = super::copy_rows(&src, rows * 2 + 1);
+            assert_eq!(odd, src, "fallback rows={rows}");
+        }
+    }
+
+    #[test]
+    fn copy_rows_preserves_element_type() {
+        let src: Vec<f32> = (0..1024).map(|i| i as f32 * 0.5 - 3.0).collect();
+        let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, src.len() * 4) };
+        let got: Vec<f32> = super::copy_rows(bytes, 64);
+        assert_eq!(got, src);
+    }
+
+    #[test]
+    fn alloc_rows_is_zeroed() {
+        for (elems, rows) in [(0usize, 0usize), (16, 16), (4096, 128), (1000, 8)] {
+            let v: Vec<i8> = super::alloc_rows(elems, rows);
+            assert_eq!(v.len(), elems);
+            assert!(v.iter().all(|&x| x == 0), "elems={elems} rows={rows}");
+        }
+    }
+
+    // The whole point: the same weights must produce the same numbers whichever node their
+    // pages live on. Quantize twice through the two allocation paths and compare exactly.
+    #[test]
+    fn numa_placement_does_not_change_results() {
+        let (n, k) = (64usize, 128usize);
+        let w: Vec<u16> = (0..n * k).map(|i| ((i * 2654435761usize >> 13) % 4001) as u16 + 15000).collect();
+        let x: Vec<f32> = (0..k).map(|i| (i % 11) as f32 * 0.1 - 0.5).collect();
+        let q = super::QMat::from_bf16(&w, n, k);
+        let mut a = vec![0f32; n];
+        super::matvec_q8(&q, &x, &mut a);
+
+        // Round-trip through the cache representation, which is where copy_rows runs.
+        let bytes: Vec<u8> = q.q.iter().map(|&b| b as u8)
+            .chain(q.scales.iter().flat_map(|s| s.to_le_bytes()))
+            .collect();
+        let (qb, sb) = bytes.split_at(n * k);
+        let q2 = super::QMat { n, k, q: super::copy_rows(qb, n), scales: super::copy_rows(sb, n) };
+        let mut b = vec![0f32; n];
+        super::matvec_q8(&q2, &x, &mut b);
+        assert_eq!(a, b, "weight placement changed the result");
+    }
     use super::*;
 
     fn f2b(f: f32) -> u16 {

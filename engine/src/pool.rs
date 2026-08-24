@@ -89,6 +89,7 @@ impl Pool {
         Pool { shared, workers: threads, job_lock: Mutex::new(()) }
     }
 
+    #[allow(dead_code)] // reported by diagnostics and useful from a debugger
     pub fn threads(&self) -> usize {
         self.workers
     }
@@ -189,6 +190,9 @@ fn worker(s: Arc<Shared>, id: usize, workers: usize) {
 /// Flush-to-zero + denormals-are-zero: denormal floats run ~100x slower on x86; inference
 /// never needs them. Every thread that does math must set this (MXCSR is per-thread).
 pub fn set_ftz_daz() {
+    // _mm_getcsr/_mm_setcsr are deprecated in favour of inline asm, but the replacement is
+    // nightly-only; the intrinsics still compile to the same two instructions.
+    #[allow(deprecated)]
     #[cfg(target_arch = "x86_64")]
     unsafe {
         use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};

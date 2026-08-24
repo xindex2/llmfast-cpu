@@ -165,7 +165,7 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
             let mut sampler = Sampler::new(req.temperature, req.top_p, req.seed);
             // Emit the first token right away (it's free: prefill already produced its logits).
             let first = sampler.sample(&mut logits);
-            let mut committed = req.prompt_ids.clone();
+            let committed = req.prompt_ids.clone();
             let draft_cache = match &draft { Some(d) => KvCache::new(&d.config), None => KvCache::new(model.config()) };
             let mtp_cache = model.mtp_cache();
             let mut seq = Seq { req, cache, draft_cache, mtp_cache, hidden: Vec::new(), committed, sampler, generated: 0, batch_sizes: 0, steps: 0, drafted: 0, accepted: 0, ngram_backoff: 0, ngram_hits: 0, ngram_tries: 0 };

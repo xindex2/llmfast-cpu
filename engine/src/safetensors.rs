@@ -41,6 +41,7 @@ impl SafeTensors {
         st
     }
 
+    #[allow(dead_code)] // single-shard open, used by tools and tests rather than the server
     pub fn open(path: &str) -> SafeTensors {
         let mut st = SafeTensors { shards: Vec::new(), tensors: HashMap::new() };
         st.add_shard(path);
@@ -94,6 +95,7 @@ impl SafeTensors {
         self.bf16(name).into_iter().map(crate::kernels::bf16_to_f32).collect()
     }
 
+    #[allow(dead_code)] // used by the fixture generator and ad-hoc inspection
     pub fn names(&self) -> impl Iterator<Item = &String> {
         self.tensors.keys()
     }

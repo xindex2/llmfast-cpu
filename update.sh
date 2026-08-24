@@ -13,7 +13,13 @@ echo "== pull"
 git pull --ff-only
 
 echo "== engine"
-(cd engine && cargo build --release -q && mv -f target/release/llmfast-engine llmfast-engine)
+# Copy via a temp name, then rename over the old binary. A bare `mv` fails with "are the same
+# file" when engine/llmfast-engine is a symlink into target/release, and renaming (rather than
+# copying onto) the destination avoids "Text file busy" while an engine is running.
+(cd engine && cargo build --release -q \
+  && cp -f target/release/llmfast-engine llmfast-engine.new \
+  && chmod +x llmfast-engine.new \
+  && mv -f llmfast-engine.new llmfast-engine)
 
 echo "== gateway"
 (cd gateway && go build -o llmfast-gateway .)
