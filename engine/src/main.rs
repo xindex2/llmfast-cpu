@@ -152,6 +152,11 @@ fn cli(engine: &server::Engine, prompt: &str) {
     let t0 = std::time::Instant::now();
     let mut logits = engine.model.forward_batch(&ids, &mut cache);
     eprintln!("prefill: {:.1} tok/s", ids.len() as f32 / t0.elapsed().as_secs_f32());
+    // top-5 candidates for the first generated token: the quickest correctness signal
+    let mut idx: Vec<usize> = (0..logits.len()).collect();
+    idx.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    let top: Vec<String> = idx[..5].iter().map(|&t| format!("{t}={:?}({:.2})", tk.decode(&[t as u32]), logits[t])).collect();
+    eprintln!("top5: {}", top.join("  "));
     let mut sampler = model::Sampler::new(0.0, 1.0, 1);
     let t1 = std::time::Instant::now();
     let mut n = 0;
@@ -163,11 +168,31 @@ fn cli(engine: &server::Engine, prompt: &str) {
         }
         n += 1;
         pending.extend(tk.token_bytes(next));
-        if let Ok(s) = std::str::from_utf8(&pending) {
-            print!("{s}");
-            std::io::stdout().flush().unwrap();
-            pending.clear();
+        // print the longest valid prefix; replace a stuck invalid byte so output keeps flowing
+        loop {
+            match std::str::from_utf8(&pending) {
+                Ok(s) => {
+                    print!("{s}");
+                    pending.clear();
+                    break;
+                }
+                Err(e) => {
+                    let ok = e.valid_up_to();
+                    if ok > 0 {
+                        print!("{}", std::str::from_utf8(&pending[..ok]).unwrap());
+                        pending.drain(..ok);
+                    }
+                    match e.error_len() {
+                        Some(bad) => {
+                            print!("?");
+                            pending.drain(..bad);
+                        }
+                        None => break, // incomplete tail: wait for more bytes
+                    }
+                }
+            }
         }
+        std::io::stdout().flush().unwrap();
         logits = engine.model.forward_multi(&[(next, 0)], &mut [&mut cache], false).pop().unwrap();
     }
     eprintln!("\ndecode: {:.1} tok/s ({n} tokens)", n as f32 / t1.elapsed().as_secs_f32());
