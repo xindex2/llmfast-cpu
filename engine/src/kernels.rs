@@ -940,7 +940,53 @@ impl QMat {
     }
 }
 
+/// The activation vector quantized once per matvec, so every row can be dotted in the integer
+/// domain. Quantizing costs O(k) and is amortised over all n rows, which at decode is free.
+pub struct Q8Vec {
+    pub q: Vec<i8>,
+    pub scales: Vec<f32>,
+}
+
+pub fn quantize_vec(x: &[f32]) -> Q8Vec {
+    let blocks = x.len() / QBLOCK;
+    let (mut q, mut scales) = (vec![0i8; blocks * QBLOCK], vec![0f32; blocks]);
+    for b in 0..blocks {
+        let src = &x[b * QBLOCK..(b + 1) * QBLOCK];
+        let amax = src.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let scale = amax / 127.0;
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        for (j, &v) in src.iter().enumerate() {
+            q[b * QBLOCK + j] = (v * inv).round().clamp(-127.0, 127.0) as i8;
+        }
+        scales[b] = scale;
+    }
+    Q8Vec { q, scales }
+}
+
+/// Decode in the integer domain. The motivation is real -- without AVX2 there is no FMA and
+/// every int8 weight must be widened to float through the single shuffle port, which is what
+/// leaves the AVX1 kernel at ~62% of the machine's memory-read ceiling -- but whether it
+/// actually wins depends on the microarchitecture, and measuring it on a machine that is
+/// already near its ceiling says nothing about one that is not.
+///
+/// So: off unless asked for. `--bench` times both paths side by side; set I8_DECODE=1 only
+/// where the integer row actually beats the f32 row on that box.
+#[cfg(target_arch = "x86_64")]
+fn i8_decode() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("I8_DECODE").is_ok_and(|v| v == "1"))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn i8_decode() -> bool {
+    false
+}
+
 pub fn matvec_q8(w: &QMat, x: &[f32], y: &mut [f32]) {
+    if i8_decode() && w.k % QBLOCK == 0 {
+        return matvec_q8_i8(w, &quantize_vec(x), y);
+    }
     let (n, k) = (w.n, w.k);
     let yp = SendPtr(y.as_mut_ptr());
     let chunks = (n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
@@ -954,6 +1000,93 @@ pub fn matvec_q8(w: &QMat, x: &[f32], y: &mut [f32]) {
         }
     });
 }
+
+pub fn matvec_q8_i8(w: &QMat, xq: &Q8Vec, y: &mut [f32]) {
+    let (n, k) = (w.n, w.k);
+    let yp = SendPtr(y.as_mut_ptr());
+    let chunks = (n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
+    pool::global().run_static(chunks, &|c| {
+        let r0 = c * ROWS_PER_CHUNK;
+        let r1 = (r0 + ROWS_PER_CHUNK).min(n);
+        let blocks = k / QBLOCK;
+        for i in r0..r1 {
+            let v = dot_q8_i8(&w.q[i * k..(i + 1) * k], &w.scales[i * blocks..(i + 1) * blocks], xq);
+            unsafe { *yp.get().add(i) = v };
+        }
+    });
+}
+
+#[inline]
+fn dot_q8_i8(q: &[i8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if simd_level() >= 1 {
+        return unsafe { sse::dot_q8_i8(q, wsc, xq) };
+    }
+    dot_q8_i8_scalar(q, wsc, xq)
+}
+
+fn dot_q8_i8_scalar(q: &[i8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+    let mut total = 0f32;
+    for (b, &sc) in wsc.iter().enumerate() {
+        let base = b * QBLOCK;
+        let mut acc = 0i32;
+        for j in 0..QBLOCK {
+            acc += q[base + j] as i32 * xq.q[base + j] as i32;
+        }
+        total += acc as f32 * sc * xq.scales[b];
+    }
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+mod sse {
+    use super::Q8Vec;
+    use std::arch::x86_64::*;
+
+    /// int8 · int8 with SSSE3/SSE4.1 only, so it runs on Sandy/Ivy Bridge as well as newer.
+    ///
+    /// `pmaddubsw` needs its first operand unsigned and saturates each int16 lane, so the
+    /// weights cannot simply be biased to unsigned: (w+128)*x summed pairwise reaches
+    /// 255*127*2 = 64770 and would clamp at 32767. The sign trick keeps both operands inside
+    /// range -- |w| is unsigned and at most 127, x*sign(w) is signed and at most 127, so a
+    /// lane holds at most 127*127*2 = 32258 -- and the product is unchanged because
+    /// |w| * (x * sign(w)) == w * x.
+    ///
+    /// The point of all this is what it avoids: the f32 path spends four shuffle-port uops per
+    /// eight weights widening int8 to float (pmovsxbd, psrldq, insertf128), and Ivy Bridge has
+    /// one shuffle port. Here the whole inner loop is two psignb, one pmaddubsw, one pmaddwd
+    /// and one paddd per sixteen weights.
+    #[target_feature(enable = "sse4.1,ssse3")]
+    pub unsafe fn dot_q8_i8(q: &[i8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+        let ones = _mm_set1_epi16(1);
+        let mut total = 0f32;
+        for (b, &sc) in wsc.iter().enumerate() {
+            let base = b * super::QBLOCK;
+            let mut acc = _mm_setzero_si128();
+            let mut j = 0;
+            while j < super::QBLOCK {
+                let w = _mm_loadu_si128(q.as_ptr().add(base + j) as *const __m128i);
+                let x = _mm_loadu_si128(xq.q.as_ptr().add(base + j) as *const __m128i);
+                let aw = _mm_sign_epi8(w, w); // |w|, read as unsigned
+                let sx = _mm_sign_epi8(x, w); // x * sign(w)
+                let p = _mm_maddubs_epi16(aw, sx);
+                acc = _mm_add_epi32(acc, _mm_madd_epi16(p, ones));
+                j += 16;
+            }
+            total += hsum_epi32(acc) as f32 * sc * xq.scales[b];
+        }
+        total
+    }
+
+    #[inline]
+    #[target_feature(enable = "sse4.1")]
+    unsafe fn hsum_epi32(v: __m128i) -> i32 {
+        let hi = _mm_add_epi32(v, _mm_shuffle_epi32(v, 0b01_00_11_10));
+        _mm_cvtsi128_si32(_mm_add_epi32(hi, _mm_shuffle_epi32(hi, 0b00_00_00_01)))
+    }
+}
+
+
 
 /// Prefill path: dequantize each chunk of rows to f32 once, then the same register-tiled kernel.
 pub fn matmul_q8(w: &QMat, xs: &[f32], m: usize, ys: &mut [f32]) {
@@ -1383,6 +1516,64 @@ pub fn rope(v: &mut [f32], pos: usize, theta: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    // The int8 decode path must agree with the f32 one to within activation-quantization
+    // error, and its SIMD form must agree with its scalar form far more tightly than that.
+    #[test]
+    fn int8_decode_matches_f32_matvec() {
+        let (n, k) = (128usize, 256usize);
+        let w: Vec<u16> = (0..n * k)
+            .map(|i| (((i * 2654435761usize) >> 9) as f32 / u32::MAX as f32 - 0.5).to_bits() as u32 >> 16)
+            .map(|b| b as u16)
+            .collect();
+        let x: Vec<f32> = (0..k).map(|i| ((i * 37 % 101) as f32 / 50.0) - 1.0).collect();
+        let q = super::QMat::from_bf16(&w, n, k);
+
+        let mut f32_out = vec![0f32; n];
+        // Force the f32 path regardless of what this machine defaults to.
+        {
+            let blocks = k / super::QBLOCK;
+            for i in 0..n {
+                f32_out[i] = super::dot_q8(&q.q[i * k..(i + 1) * k], &q.scales[i * blocks..(i + 1) * blocks], &x);
+            }
+        }
+
+        let xq = super::quantize_vec(&x);
+        let mut i8_out = vec![0f32; n];
+        super::matvec_q8_i8(&q, &xq, &mut i8_out);
+
+        let peak = f32_out.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+        let err = f32_out.iter().zip(&i8_out).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err / peak < 0.02, "int8 decode err {err} = {:.2}% of peak {peak}", err / peak * 100.0);
+
+        // SIMD vs scalar: same arithmetic, so they must agree to rounding.
+        let blocks = k / super::QBLOCK;
+        for i in [0usize, 1, n / 2, n - 1] {
+            let (qi, si) = (&q.q[i * k..(i + 1) * k], &q.scales[i * blocks..(i + 1) * blocks]);
+            let scalar = super::dot_q8_i8_scalar(qi, si, &xq);
+            let simd = super::dot_q8_i8(qi, si, &xq);
+            assert!((scalar - simd).abs() <= 1e-3 * scalar.abs().max(1.0), "row {i}: scalar {scalar} simd {simd}");
+        }
+    }
+
+    // pmaddubsw saturates each int16 lane. The sign trick must keep every lane inside range
+    // even when every weight and every activation is at the extreme.
+    #[test]
+    fn int8_decode_survives_saturating_extremes() {
+        let (n, k) = (2usize, super::QBLOCK);
+        // All weights at -1.0 and all activations at -1.0 => every code is +-127.
+        let neg_one = ((-1.0f32).to_bits() >> 16) as u16;
+        let w = vec![neg_one; n * k];
+        let x = vec![-1.0f32; k];
+        let q = super::QMat::from_bf16(&w, n, k);
+        let xq = super::quantize_vec(&x);
+        let mut out = vec![0f32; n];
+        super::matvec_q8_i8(&q, &xq, &mut out);
+        // Every product is (-1)(-1) = 1, summed over k.
+        for v in &out {
+            assert!((v - k as f32).abs() < 0.05 * k as f32, "saturated: got {v}, want {k}");
+        }
+    }
 
     // Placement must never change contents: these run over sizes that cross the row-chunk
     // boundary and sizes that cannot be split by rows at all (the serial fallback).

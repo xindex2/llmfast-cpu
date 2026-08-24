@@ -286,6 +286,32 @@ fn bench_stream() {
             1.0 / dt,
         );
     }
+    // The two decode kernels head to head, and how far they agree.
+    {
+        let q = kernels::QMat::from_bf16(&w, n, k);
+        let bytes = n * k + n * k / 32 * 4;
+        let xq = kernels::quantize_vec(&x);
+        let mut yi = vec![0f32; n];
+        kernels::matvec_q8_i8(&q, &xq, &mut yi);
+        let iters = 30;
+        let t = Instant::now();
+        for _ in 0..iters {
+            kernels::matvec_q8_i8(&q, &kernels::quantize_vec(&x), &mut yi);
+        }
+        let dt = t.elapsed().as_secs_f64() / iters as f64;
+        let gbs = bytes as f64 / dt / 1e9;
+        eprintln!(
+            "matvec_q8_i8 (integer decode) {n}x{k}: {:.2} ms  {gbs:.1} GB/s  ({:.0}% of ceiling)  -> {:.1} tok/s",
+            dt * 1e3, gbs / peak * 100.0, 1.0 / dt,
+        );
+        let mut yf = vec![0f32; n];
+        std::env::set_var("I8_DECODE", "0");
+        kernels::matvec_q8(&q, &x, &mut yf);
+        std::env::remove_var("I8_DECODE");
+        let pk = yf.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+        let err = yf.iter().zip(&yi).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        eprintln!("  int8 vs f32 decode: max abs err {err:.5} ({:.3}% of peak)", err / pk * 100.0);
+    }
     eprintln!("  (near 100% of ceiling = memory-bound, only more channels help; well under = the kernel has headroom)");
 }
 
