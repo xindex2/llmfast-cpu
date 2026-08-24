@@ -145,7 +145,8 @@ fn main() {
 fn cli(engine: &server::Engine, prompt: &str) {
     use std::io::Write;
     let tk = &engine.tokenizer;
-    let text = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{}", if engine.think { "" } else { "<think>\n\n</think>\n\n" });
+    let suffix = if engine.model.config().lin.is_some() { "<think>\n" } else if engine.think { "" } else { "<think>\n\n</think>\n\n" };
+    let text = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{suffix}");
     let ids = tk.encode(&text);
     eprintln!("prompt tokens: {:?}", ids);
     let mut cache = engine.model.new_cache();

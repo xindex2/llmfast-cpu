@@ -80,6 +80,9 @@ fn handle(mut stream: TcpStream, engine: &Engine) {
 }
 
 /// Qwen chat template: <|im_start|>role\ncontent<|im_end|>\n … <|im_start|>assistant\n
+/// Qwen3: non-thinking mode closes an empty think block. Qwen3.5 hybrids are ALWAYS-thinking:
+/// their template ends with an OPEN <think>\n and the model closes it itself — feeding a closed
+/// block puts the model out of distribution (garbage output).
 fn build_prompt(engine: &Engine, messages: &[Value]) -> String {
     let mut p = String::new();
     for m in messages {
@@ -88,7 +91,9 @@ fn build_prompt(engine: &Engine, messages: &[Value]) -> String {
         p.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
     }
     p.push_str("<|im_start|>assistant\n");
-    if !engine.think {
+    if engine.model.config().lin.is_some() {
+        p.push_str("<think>\n");
+    } else if !engine.think {
         p.push_str("<think>\n\n</think>\n\n");
     }
     p
