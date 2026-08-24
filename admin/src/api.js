@@ -1,11 +1,17 @@
 // Tokens are kept in localStorage so the admin can point this UI at any gateway/domain.
+// Settings saved under the old key are migrated once, so the rename does not sign anyone out.
+for (const [old, now] of [['forge.base', 'llmfast.base'], ['forge.admin', 'llmfast.admin'], ['forge.key', 'llmfast.key']]) {
+  const v = localStorage.getItem(old)
+  if (v !== null && localStorage.getItem(now) === null) localStorage.setItem(now, v)
+}
+
 export const cfg = {
-  get base() { return localStorage.getItem('forge.base') || '' },
-  set base(v) { localStorage.setItem('forge.base', v) },
-  get adminToken() { return localStorage.getItem('forge.admin') || 'admin' },
-  set adminToken(v) { localStorage.setItem('forge.admin', v) },
-  get apiKey() { return localStorage.getItem('forge.key') || 'dev-key' },
-  set apiKey(v) { localStorage.setItem('forge.key', v) },
+  get base() { return localStorage.getItem('llmfast.base') || '' },
+  set base(v) { localStorage.setItem('llmfast.base', v) },
+  get adminToken() { return localStorage.getItem('llmfast.admin') || 'admin' },
+  set adminToken(v) { localStorage.setItem('llmfast.admin', v) },
+  get apiKey() { return localStorage.getItem('llmfast.key') || 'dev-key' },
+  set apiKey(v) { localStorage.setItem('llmfast.key', v) },
 }
 
 async function call(path, { method = 'GET', body, token } = {}) {

@@ -1,6 +1,6 @@
 # Install on a CPU VPS (DigitalOcean, Hetzner, OVH, any Ubuntu box)
 
-Forge runs entirely on CPU: our own Rust engine (AVX2/AVX kernels, int8/int4, batching, prefix
+llmfa.st runs entirely on CPU: our own Rust engine (AVX2/AVX kernels, int8/int4, batching, prefix
 cache, speculation), a Go gateway (OpenAI-compatible API + OpenRouter provider document), and a
 React admin. No CUDA, no Python, no third-party inference libraries.
 
@@ -25,12 +25,12 @@ selected automatically; on very old CPUs the engine falls back to AVX or scalar.
 
 ```bash
 ssh root@<droplet-ip>
-adduser forge && usermod -aG sudo forge && su - forge
+adduser llmfast && usermod -aG sudo llmfast && su - llmfast
 curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/install.sh | bash
 ```
 
-This builds everything into `/opt/forge`, generates an admin token in `/opt/forge/gateway.env`,
-and starts `forge-gateway` as a systemd service on port 8080.
+This builds everything into `/opt/llmfast`, generates an admin token in `/opt/llmfast/gateway.env`,
+and starts `llmfast-gateway` as a systemd service on port 8080.
 
 Manual equivalent:
 
@@ -38,9 +38,9 @@ Manual equivalent:
 sudo apt install -y build-essential curl git
 curl -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env
 # Go 1.24 and Node 22 as in install.sh
-git clone https://github.com/xindex2/llmfast-cpu /opt/forge && cd /opt/forge
-(cd engine && cargo build --release && mv -f target/release/forge-engine forge-engine)
-(cd gateway && go build -o forge-gateway .) && (cd admin && npm ci && npm run build)
+git clone https://github.com/xindex2/llmfast-cpu /opt/llmfast && cd /opt/llmfast
+(cd engine && cargo build --release && mv -f target/release/llmfast-engine llmfast-engine)
+(cd gateway && go build -o llmfast-gateway .) && (cd admin && npm ci && npm run build)
 cp deploy/gateway.env.example gateway.env   # edit ADMIN_TOKEN, paths
 ./start.sh                                  # or the systemd unit in deploy/
 ```
@@ -69,7 +69,7 @@ use the prices you set.
 | `DRAFT_MODEL` | — | dir of a small same-family model for speculative decoding (big dense targets) |
 | `PIN`, `STATIC` | on (Linux) | NUMA-aware pinning / owner-first scheduling; set `PIN=0` on tiny shared VPSes |
 
-Diagnostics: `engine/target/release/forge-engine --bench` (kernel GFLOPS & GB/s),
+Diagnostics: `engine/target/release/llmfast-engine --bench` (kernel GFLOPS & GB/s),
 `--prompt "hi"` (CLI generation), `PROFILE=1` (per-step timing in the engine log).
 
 ## 5. Domain + TLS + OpenRouter

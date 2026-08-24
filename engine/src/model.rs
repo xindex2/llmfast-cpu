@@ -334,11 +334,15 @@ mod wcache {
     }
 
     pub fn path(dir: &str, quant: &str) -> String {
-        format!("{dir}/.forge-cache-{quant}.bin")
+        format!("{dir}/.llmfast-cache-{quant}.bin")
     }
 
     pub fn read(dir: &str, quant: &str) -> Option<HashMap<String, Weight>> {
-        let mut f = std::fs::File::open(path(dir, quant)).ok()?;
+        // accept a cache written before the project rename rather than re-quantizing
+        let legacy = format!("{dir}/.forge-cache-{quant}.bin");
+        let mut f = std::fs::File::open(path(dir, quant))
+            .or_else(|_| std::fs::File::open(&legacy))
+            .ok()?;
         let mut len8 = [0u8; 8];
         f.read_exact(&mut len8).ok()?;
         let hlen = u64::from_le_bytes(len8) as usize;

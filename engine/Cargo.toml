@@ -1,5 +1,5 @@
 [package]
-name = "forge-engine"
+name = "llmfast-engine"
 version = "0.1.0"
 edition = "2021"
 

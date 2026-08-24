@@ -9,12 +9,12 @@ survives reboots — pm2 is a Node process manager and we ship Go and Rust binar
 
 ```bash
 ssh root@<server-ip>
-adduser forge && usermod -aG sudo forge && su - forge
+adduser llmfast && usermod -aG sudo llmfast && su - llmfast
 curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/install.sh | bash
 ```
 
-Builds into `/opt/forge`, writes `/opt/forge/gateway.env` with a generated `ADMIN_TOKEN`, and
-starts `forge-gateway` on port 8080 under systemd.
+Builds into `/opt/llmfast`, writes `/opt/llmfast/gateway.env` with a generated `ADMIN_TOKEN`, and
+starts `llmfast-gateway` on port 8080 under systemd.
 
 Put the tools on your PATH permanently (the installer's shells are throwaway):
 
@@ -35,8 +35,8 @@ DNS — both records point at the same server:
 
 ```bash
 sudo apt install -y caddy
-sudo cp /opt/forge/deploy/Caddyfile /etc/caddy/Caddyfile
-sudo cp -r /Users/you/llmfast/site /opt/forge/site      # the marketing site
+sudo cp /opt/llmfast/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo cp -r /Users/you/llmfast/site /opt/llmfast/site      # the marketing site
 sudo systemctl reload caddy                              # certificates are issued on first request
 sudo ufw allow 22,80,443/tcp && sudo ufw enable          # keep 8080 internal
 ```
@@ -45,32 +45,46 @@ What each URL serves:
 
 | URL | serves |
 |---|---|
-| `https://llmfa.st` | marketing site (`/opt/forge/site`) |
+| `https://llmfa.st` | marketing site (`/opt/llmfast/site`) |
 | `https://llmfa.st/v1/chat/completions` | the API — a friendly base URL for customers |
 | `https://llmfa.st/app/admin/ui` | admin + customer dashboard |
 | `https://api.llmfa.st` | the same API on its own host — **give OpenRouter this one**, so the backend can move hardware without touching the site |
 | `https://api.llmfa.st/models` | the OpenRouter provider document |
 
-## 3. Updating
+## 3. Renaming an existing install (forge → llmfa.st)
+
+Servers set up before the rename keep working: `./update.sh` retires the old
+`forge-gateway.service`, installs `llmfast-gateway.service` pointing at wherever the checkout
+lives, and the engine still reads `.forge-cache-*.bin` files so big models are not re-quantized.
+The directory can stay `/opt/forge`; rename it only if you want to:
 
 ```bash
-cd /opt/forge && ./update.sh           # pull, rebuild, restart gateway (engines keep serving)
-cd /opt/forge && ./update.sh engines   # also stop engines, then press "start engine" in the admin
+cd /opt/forge && ./update.sh          # migrates the service in place
+# optional, and only if nothing else references the old path:
+sudo systemctl stop llmfast-gateway
+sudo mv /opt/forge /opt/llmfast && cd /opt/llmfast && ./update.sh
+```
+
+## 4. Updating
+
+```bash
+cd /opt/llmfast && ./update.sh           # pull, rebuild, restart gateway (engines keep serving)
+cd /opt/llmfast && ./update.sh engines   # also stop engines, then press "start engine" in the admin
 ```
 
 Engine restarts are cheap after the first load: quantized weights are cached next to the
-checkpoint (`.forge-cache-<quant>.bin`), so a 27B starts in ~20 s instead of ~4 minutes.
+checkpoint (`.llmfast-cache-<quant>.bin`), so a 27B starts in ~20 s instead of ~4 minutes.
 
-## 4. Day-to-day
+## 5. Day-to-day
 
 - **Models** page: paste a Hugging Face id, set prices, start/stop engines, pick quant and device.
 - **Benchmarks** page: run real load at a chosen concurrency; p50/p95 TTFT and per-stream tok/s
   are the numbers OpenRouter publishes, aggregate tok/s sizes the fleet.
 - **Launch** page: live checklist of every OpenRouter provider requirement.
 - **Dashboard**: today / 7d / custom period, uptime, failures, earnings.
-- Logs: `journalctl -u forge-gateway -f` and `<models dir>/<model>/engine.log`.
+- Logs: `journalctl -u llmfast-gateway -f` and `<models dir>/<model>/engine.log`.
 
-## 5. Useful settings (`/opt/forge/gateway.env`)
+## 6. Useful settings (`/opt/llmfast/gateway.env`)
 
 | variable | why |
 |---|---|

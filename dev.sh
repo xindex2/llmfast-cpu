@@ -3,8 +3,8 @@
 set -e
 cd "$(dirname "$0")"
 MODEL="${MODEL:-../models/qwen3-0.6b}"
-(cd engine && MODEL="$MODEL" ./target/release/forge-engine) &
+(cd engine && MODEL="$MODEL" ./target/release/llmfast-engine) &
 sleep 3
-(cd gateway && ./forge-gateway) &
+(cd gateway && ./llmfast-gateway) &
 (cd admin && npm run dev) &
 wait

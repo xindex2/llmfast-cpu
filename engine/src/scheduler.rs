@@ -104,7 +104,7 @@ impl PrefixCache {
 impl Scheduler {
     pub fn start(model: Arc<Net>, draft: Option<Arc<Model>>) -> Scheduler {
         let (tx, rx) = channel::<Request>();
-        std::thread::Builder::new().name("forge-sched".into()).spawn(move || run(model, draft, rx)).unwrap();
+        std::thread::Builder::new().name("llmfast-sched".into()).spawn(move || run(model, draft, rx)).unwrap();
         Scheduler { tx }
     }
 

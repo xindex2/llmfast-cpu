@@ -1,4 +1,4 @@
-// Forge GPU kernels. Q8 weights: 32-weight blocks, int8 codes packed 4 per u32, one f32 scale per block.
+// llmfa.st GPU kernels. Q8 weights: 32-weight blocks, int8 codes packed 4 per u32, one f32 scale per block.
 
 struct MatParams { n: u32, k: u32, m: u32, _pad: u32 };
 struct LayerParams { m: u32, hidden: u32, heads: u32, kv_heads: u32, head_dim: u32, inter: u32, eps: f32, _p: u32 };

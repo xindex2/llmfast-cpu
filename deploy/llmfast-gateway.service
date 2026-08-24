@@ -1,0 +1,15 @@
+[Unit]
+Description=llmfa.st gateway (api.llmfa.st)
+After=network-online.target
+
+[Service]
+User=llmfast
+WorkingDirectory=/opt/llmfast/gateway
+EnvironmentFile=/opt/llmfast/gateway.env
+ExecStart=/opt/llmfast/gateway/llmfast-gateway
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

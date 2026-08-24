@@ -161,7 +161,7 @@ impl GpuModel {
         let c = m.config.clone();
         let (h, hd, kvh) = (c.heads, c.head_dim, c.kv_heads);
         let (qd, kd) = (h * hd, kvh * hd);
-        let shader = dev.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("forge"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()) });
+        let shader = dev.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("llmfast"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()) });
         let mk = |name: &str, entries: &[wgpu::BindGroupLayoutEntry]| {
             let l = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries });
             let pl = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&l], push_constant_ranges: &[] });

@@ -1,8 +1,8 @@
-//! forge-engine: one process per server. Speaks the OpenAI-compatible SSE protocol the
+//! llmfast-engine: one process per server. Speaks the OpenAI-compatible SSE protocol the
 //! gateway consumes (`POST /v1/chat/completions`, `GET /health`).
 //!
-//!   MODEL=../models/qwen3-0.6b ADDR=0.0.0.0:9000 forge-engine          # serve
-//!   MODEL=../models/qwen3-0.6b forge-engine --prompt "hello"           # one-shot CLI test
+//!   MODEL=../models/qwen3-0.6b ADDR=0.0.0.0:9000 llmfast-engine          # serve
+//!   MODEL=../models/qwen3-0.6b llmfast-engine --prompt "hello"           # one-shot CLI test
 //!
 //! Env: MAX_CONTEXT (default 4096), THINK=1 to enable Qwen3 thinking mode, MODEL_NAME,
 //!      DRAFT_MODEL=<dir> + SPEC_K=<n> for speculative decoding, QUANT / DRAFT_QUANT.
@@ -135,7 +135,7 @@ fn main() {
             engine.model.config().max_context, std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
         *slot2.write().unwrap() = Some(engine);
     });
-    eprintln!("forge-engine listening on {addr} — loading {name}");
+    eprintln!("llmfast-engine listening on {addr} — loading {name}");
     server::serve(&addr, slot, name);
 }
 

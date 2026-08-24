@@ -50,7 +50,7 @@ type Registry struct {
 
 func NewRegistry(s *Server) *Registry {
 	return &Registry{store: s.store, procs: map[string]*exec.Cmd{}, server: s,
-		dir: envOr("MODELS_DIR", "../models"), engine: envOr("ENGINE_BIN", "../engine/target/release/forge-engine"), nextPrt: 9001}
+		dir: envOr("MODELS_DIR", "../models"), engine: envOr("ENGINE_BIN", "../engine/target/release/llmfast-engine"), nextPrt: 9001}
 }
 
 func slugify(hf string) string {
@@ -87,7 +87,7 @@ func (r *Registry) syncPricing() {
 	defer r.store.mu.Unlock()
 	var out []ModelInfo
 	for _, m := range r.store.Models {
-		out = append(out, ModelInfo{ID: m.ID, Object: "model", OwnedBy: "forge", ContextLength: m.ContextLength,
+		out = append(out, ModelInfo{ID: m.ID, Object: "model", OwnedBy: "llmfast", ContextLength: m.ContextLength,
 			PromptPrice: m.PromptPrice, OutputPrice: m.OutputPrice, CachedPrice: m.CachedPrice})
 	}
 	if len(out) > 0 {

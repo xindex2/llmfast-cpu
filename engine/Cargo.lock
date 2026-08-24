@@ -192,17 +192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
-name = "forge-engine"
-version = "0.1.0"
-dependencies = [
- "libc",
- "memmap2",
- "pollster",
- "serde_json",
- "wgpu",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +418,17 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "llmfast-engine"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "memmap2",
+ "pollster",
+ "serde_json",
+ "wgpu",
+]
 
 [[package]]
 name = "lock_api"

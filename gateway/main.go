@@ -21,7 +21,7 @@ import (
 // Models we advertise. Prices are what we charge per 1M tokens (what OpenRouter pays us, before their cut).
 // MODELS env overrides: "id:ctx:prompt$/M:completion$/M,..."
 var models = []ModelInfo{
-	{ID: "qwen3-0.6b", Object: "model", OwnedBy: "forge", ContextLength: 4096, PromptPrice: 0.02, OutputPrice: 0.05, CachedPrice: 0.005},
+	{ID: "qwen3-0.6b", Object: "model", OwnedBy: "llmfast", ContextLength: 4096, PromptPrice: 0.02, OutputPrice: 0.05, CachedPrice: 0.005},
 }
 
 func loadModels() {
@@ -42,7 +42,7 @@ func loadModels() {
 		if len(f) == 5 {
 			cache, _ = strconv.ParseFloat(f[4], 64)
 		}
-		models = append(models, ModelInfo{ID: f[0], Object: "model", OwnedBy: "forge", ContextLength: ctx, PromptPrice: pp, OutputPrice: cp, CachedPrice: cache})
+		models = append(models, ModelInfo{ID: f[0], Object: "model", OwnedBy: "llmfast", ContextLength: ctx, PromptPrice: pp, OutputPrice: cp, CachedPrice: cache})
 	}
 }
 
@@ -536,7 +536,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	quant := envOr("QUANTIZATION", "int8")
 	country := envOr("DATACENTER_COUNTRY", "US")
 	region := envOr("DATACENTER_REGION", "")
-	hq := envOr("PROVIDER_SLUG", "forge")
+	hq := envOr("PROVIDER_SLUG", "llmfast")
 	price := func(p float64) string {
 		str := strconv.FormatFloat(p/1e6, 'f', 12, 64)
 		str = strings.TrimRight(strings.TrimRight(str, "0"), ".")
@@ -558,12 +558,12 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		data = append(data, map[string]any{
 			"schema_version":  "2.4",
 			"id":              m.ID,
-			"name":            "Forge: " + m.ID,
+			"name":            "llmfa.st: " + m.ID,
 			"hugging_face_id": envOr("HF_ID_"+strings.ToUpper(strings.NewReplacer("-", "_", ".", "_", "/", "_").Replace(m.ID)), ""),
 			"created":         1756000000,
 			"quantization":    quant,
 			"tokenizer":       "Qwen3",
-			"description":     m.ID + " served by Forge's CPU inference engine with prefix caching.",
+			"description":     m.ID + " served by llmfa.st's CPU inference engine with prefix caching.",
 			"input_modalities": []map[string]any{{
 				"type":             "text",
 				"supported_inputs": map[string]any{"max_context_length": map[string]any{"value": m.ContextLength, "unit": "token"}},
@@ -624,7 +624,7 @@ func cors(next http.Handler) http.Handler {
 func main() {
 	loadModels()
 	addr := envOr("ADDR", ":8080")
-	s := &Server{store: LoadStore(envOr("STORE", "forge-store.json")), adminToken: envOr("ADMIN_TOKEN", "admin"), maxInflight: int64(envInt("MAX_INFLIGHT", 16))}
+	s := &Server{store: LoadStore(envOr("STORE", "llmfast-store.json")), adminToken: envOr("ADMIN_TOKEN", "admin"), maxInflight: int64(envInt("MAX_INFLIGHT", 16))}
 	if urls := os.Getenv("ENGINE_URL"); urls != "" {
 		for _, u := range strings.Split(urls, ",") {
 			s.engines = append(s.engines, NewHTTPEngine(strings.TrimSpace(u)))
@@ -647,7 +647,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"service": "forge-gateway", "endpoints": []string{"GET /health", "GET /models (OpenRouter provider doc)", "GET /v1/models", "POST /v1/chat/completions", "GET /admin/stats", "/admin/keys", "/admin/benchmarks"}, "admin_ui": envOr("ADMIN_URL", "http://localhost:5173")})
+		writeJSON(w, 200, map[string]any{"service": "llmfast-gateway", "endpoints": []string{"GET /health", "GET /models (OpenRouter provider doc)", "GET /v1/models", "POST /v1/chat/completions", "GET /admin/stats", "/admin/keys", "/admin/benchmarks"}, "admin_ui": envOr("ADMIN_URL", "http://localhost:5173")})
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("GET /v1/models", s.handleModels)
@@ -690,10 +690,10 @@ func main() {
 	handler := cors(mux)
 	cert, key := os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY")
 	if cert != "" && key != "" {
-		log.Printf("forge gateway listening on %s with TLS (engines: %d)", addr, len(s.engines))
+		log.Printf("llmfa.st gateway listening on %s with TLS (engines: %d)", addr, len(s.engines))
 		log.Fatal(http.ListenAndServeTLS(addr, cert, key, handler))
 	}
-	log.Printf("forge gateway listening on %s (engines: %d)", addr, len(s.engines))
+	log.Printf("llmfa.st gateway listening on %s (engines: %d)", addr, len(s.engines))
 	log.Fatal(http.ListenAndServe(addr, handler))
 }
 

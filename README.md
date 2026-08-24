@@ -1,4 +1,4 @@
-# Forge (llmfast) — your own LLM inference provider, CPU or GPU
+# llmfa.st (llmfast) — your own LLM inference provider, CPU or GPU
 
 **Install guides:** [CPU VPS (DigitalOcean etc.)](docs/install-cpu-vps.md) · [GPU server (RunPod etc.)](docs/install-gpu-runpod.md) · [domain + TLS](deploy/README.md)
 
@@ -8,7 +8,7 @@ Own-built inference provider: run big open MoE models (Qwen3-30B-A3B, Qwen3-235B
 on commodity CPU servers and sell tokens through OpenRouter.
 
 ```
-forge/
+llmfa.st/
   engine/    Rust   — inference engine: CPU (AVX2/AVX kernels) and GPU (our WGSL shaders via wgpu), MoE, batching, speculation
   gateway/   Go     — OpenAI-compatible API, API keys, routing, metering, admin API
   admin/     React  — admin dashboard, playground, benchmarks, earnings calculator
@@ -40,12 +40,12 @@ load-balances across N of them, stats are aggregated centrally.
 ```bash
 # engine (needs a checkpoint dir with config.json, model.safetensors, tokenizer.json)
 cd engine && cargo build --release
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine                    # serves :9000
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine --prompt "hello"   # one-shot CLI
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine --bench            # kernel GFLOPS/GB-s
+MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine                    # serves :9000
+MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine --prompt "hello"   # one-shot CLI
+MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine --bench            # kernel GFLOPS/GB-s
 
 # gateway (OpenAI API + admin API + provider document)
-cd gateway && go build -o forge-gateway . && ./forge-gateway                # :8080
+cd gateway && go build -o llmfast-gateway . && ./llmfast-gateway                # :8080
 
 # admin UI
 cd admin && npm install && npm run dev                                      # :5173
@@ -62,11 +62,11 @@ Short version: **Caddy** for TLS (automatic certificates), **systemd** for super
 ```bash
 # first install on fresh Ubuntu
 curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/install.sh | bash
-sudo cp /opt/forge/deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+sudo cp /opt/llmfast/deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 
 # every update after that
-cd /opt/forge && ./update.sh            # pull + rebuild + restart gateway
-cd /opt/forge && ./update.sh engines    # also restart the model engines
+cd /opt/llmfast && ./update.sh            # pull + rebuild + restart gateway
+cd /opt/llmfast && ./update.sh engines    # also restart the model engines
 ```
 
 | URL | serves |

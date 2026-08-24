@@ -51,7 +51,7 @@ impl Gpu {
         let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("forge"),
+                label: Some("llmfast"),
                 required_features: wgpu::Features::empty(),
                 required_limits: limits.clone(),
                 memory_hints: wgpu::MemoryHints::Performance,
@@ -59,7 +59,7 @@ impl Gpu {
             None,
         )).ok()?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("forge-shaders"),
+            label: Some("llmfast-shaders"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()),
         });
         let entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {

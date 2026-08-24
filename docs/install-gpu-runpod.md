@@ -1,6 +1,6 @@
 # Install on a GPU server (RunPod, Vast, Lambda, any NVIDIA/AMD Linux box)
 
-Forge's GPU backend is our own: compute shaders (`engine/src/shaders.wgsl`) driven through `wgpu`,
+llmfa.st's GPU backend is our own: compute shaders (`engine/src/shaders.wgsl`) driven through `wgpu`,
 which talks to **Vulkan** on Linux (NVIDIA and AMD). There is no CUDA dependency, so it runs
 on any card with a Vulkan driver. The same binary auto-detects the GPU; if the model doesn't
 fit (or no GPU is found) it falls back to the CPU engine.
@@ -40,7 +40,7 @@ pod with env `NVIDIA_DRIVER_CAPABILITIES=all` (RunPod → Edit Pod → Environme
 Containers have no systemd, so start the gateway with:
 
 ```bash
-cd /opt/forge
+cd /opt/llmfast
 echo "GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)" >> gateway.env
 nohup ./start.sh > gateway.log 2>&1 &
 ```
@@ -50,9 +50,9 @@ nohup ./start.sh > gateway.log 2>&1 &
 ## 3. Verify the GPU path before serving
 
 ```bash
-cd /opt/forge/engine
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine --gpu-bench    # kernel vs CPU, GB/s
-MODEL=../models/qwen3-0.6b ./target/release/forge-engine --gpu-check    # full forward: GPU logits == CPU logits
+cd /opt/llmfast/engine
+MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine --gpu-bench    # kernel vs CPU, GB/s
+MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine --gpu-check    # full forward: GPU logits == CPU logits
 ```
 
 Expect `max abs err 0.0000` and matching argmax. On an NVIDIA card the decode number should be

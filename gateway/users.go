@@ -51,7 +51,7 @@ func randHex(n int) string {
 }
 
 func hashPass(pass, salt string) string {
-	h := sha256.Sum256([]byte(salt + pass + "forge"))
+	h := sha256.Sum256([]byte(salt + pass + "llmfast"))
 	return hex.EncodeToString(h[:])
 }
 
@@ -238,7 +238,7 @@ func (s *Store) AddCredit(userID string, usd float64) error {
 
 const freeCreditUSD = 1.0 // starter credit on signup
 
-var sessionCookie = "forge_session"
+var sessionCookie = "llmfast_session"
 
 func (s *Server) currentUser(r *http.Request) *User {
 	if c, err := r.Cookie(sessionCookie); err == nil {
