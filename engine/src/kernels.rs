@@ -391,6 +391,65 @@ mod avx {
         }
     }
 
+
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn dot_f32_i8(x: &[f32], q: &[i8]) -> f32 {
+        let n = x.len();
+        let (mut a0, mut a1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let mut i = 0;
+        while i + 16 <= n {
+            let q8 = _mm_loadu_si128(q.as_ptr().add(i) as *const __m128i);
+            let lo = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q8));
+            let hi = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(q8, 8)));
+            a0 = _mm256_fmadd_ps(lo, _mm256_loadu_ps(x.as_ptr().add(i)), a0);
+            a1 = _mm256_fmadd_ps(hi, _mm256_loadu_ps(x.as_ptr().add(i + 8)), a1);
+            i += 16;
+        }
+        let mut s = hsum(_mm256_add_ps(a0, a1));
+        while i < n {
+            s += x[i] * *q.get_unchecked(i) as f32;
+            i += 1;
+        }
+        s
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn axpy_i8(y: &mut [f32], q: &[i8], a: f32) {
+        let n = y.len();
+        let av = _mm256_set1_ps(a);
+        let mut i = 0;
+        while i + 8 <= n {
+            let q8 = _mm_loadl_epi64(q.as_ptr().add(i) as *const __m128i);
+            let qf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q8));
+            let yv = _mm256_loadu_ps(y.as_ptr().add(i));
+            _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_fmadd_ps(av, qf, yv));
+            i += 8;
+        }
+        while i < n {
+            y[i] += a * *q.get_unchecked(i) as f32;
+            i += 1;
+        }
+    }
+
+    /// int8 dot with per-block scales. `maddubs` needs one unsigned operand and saturates at
+    /// i16, so the standard trick is used: |w| (always < 128) against x*sign(w), whose products
+    /// stay inside 127*127*2 < 32767. Sums are exact in int32; only the scales are float.
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn dot_i8(wq: &[i8], wsc: &[f32], xq: &[i8], xsc: &[f32]) -> f32 {
+        let ones = _mm256_set1_epi16(1);
+        let mut acc = _mm256_setzero_ps();
+        for b in 0..wsc.len() {
+            let w = _mm256_loadu_si256(wq.as_ptr().add(b * super::QBLOCK) as *const __m256i);
+            let x = _mm256_loadu_si256(xq.as_ptr().add(b * super::QBLOCK) as *const __m256i);
+            let aw = _mm256_sign_epi8(w, w);   // |w|, unsigned
+            let sx = _mm256_sign_epi8(x, w);   // x * sign(w)
+            let p = _mm256_maddubs_epi16(aw, sx);
+            let s = _mm256_madd_epi16(p, ones);
+            acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s), _mm256_set1_ps(*wsc.get_unchecked(b) * *xsc.get_unchecked(b)), acc);
+        }
+        hsum(acc)
+    }
+
     /// Q8 dot: per 32-block, widen int8→f32 in registers, FMA against x, then scale.
     #[target_feature(enable = "avx2,fma")]
     pub unsafe fn dot_q8(q: &[i8], scales: &[f32], x: &[f32]) -> f32 {
@@ -973,6 +1032,149 @@ fn dot_q4(q: &[u8], scales: &[f32], x: &[f32]) -> f32 {
         s += acc * sc;
     }
     s
+}
+
+
+// ---------------------------------------------------------------------------------------
+// int8 GEMM for prefill. The f32 path dequantizes every weight to float and multiplies in
+// floats; here both sides stay 8-bit and accumulate in int32, which is what the hardware is
+// fastest at. Activations are quantized per 32-block exactly like the weights, so the product
+// of the two block scales rescales an exact int32 dot product.
+// ---------------------------------------------------------------------------------------
+
+/// Activations quantized to int8, blocks of QBLOCK sharing one scale.
+pub struct Q8Act {
+    pub q: Vec<i8>,
+    pub scales: Vec<f32>,
+    pub k: usize,
+}
+
+pub fn quantize_act(xs: &[f32], m: usize, k: usize) -> Q8Act {
+    let blocks = k / QBLOCK;
+    let mut q = vec![0i8; m * k];
+    let mut scales = vec![0f32; m * blocks];
+    for j in 0..m {
+        for b in 0..blocks {
+            let off = j * k + b * QBLOCK;
+            let mut amax = 0f32;
+            for i in 0..QBLOCK {
+                amax = amax.max(xs[off + i].abs());
+            }
+            let scale = amax / 127.0;
+            let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+            scales[j * blocks + b] = scale;
+            for i in 0..QBLOCK {
+                q[off + i] = (xs[off + i] * inv).round().clamp(-127.0, 127.0) as i8;
+            }
+        }
+    }
+    Q8Act { q, scales, k }
+}
+
+/// Y = X · Wᵀ with both sides int8. Weight rows stay in cache across all m activations.
+pub fn matmul_q8_int8(w: &QMat, x: &Q8Act, m: usize, ys: &mut [f32]) {
+    let (n, k) = (w.n, w.k);
+    debug_assert_eq!(x.k, k);
+    let blocks = k / QBLOCK;
+    let yp = SendPtr(ys.as_mut_ptr());
+    let chunks = (n + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
+    pool::global().run_static(chunks, &|c| {
+        let r0 = c * ROWS_PER_CHUNK;
+        let r1 = (r0 + ROWS_PER_CHUNK).min(n);
+        for i in r0..r1 {
+            let wq = &w.q[i * k..(i + 1) * k];
+            let wsc = &w.scales[i * blocks..(i + 1) * blocks];
+            for j in 0..m {
+                let xq = &x.q[j * k..(j + 1) * k];
+                let xsc = &x.scales[j * blocks..(j + 1) * blocks];
+                let v = dot_i8(wq, wsc, xq, xsc);
+                unsafe { *yp.get().add(j * n + r0 + (i - r0)) = v };
+            }
+        }
+    });
+}
+
+#[inline]
+fn dot_i8(wq: &[i8], wsc: &[f32], xq: &[i8], xsc: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        return unsafe { avx::dot_i8(wq, wsc, xq, xsc) };
+    }
+    let mut total = 0f32;
+    for (b, (&ws, &xs)) in wsc.iter().zip(xsc).enumerate() {
+        let mut acc = 0i32;
+        for i in 0..QBLOCK {
+            acc += wq[b * QBLOCK + i] as i32 * xq[b * QBLOCK + i] as i32;
+        }
+        total += acc as f32 * ws * xs;
+    }
+    total
+}
+
+/// dot(x_f32, q_i8) * scale — used to score int8 KV rows without materializing them as f32.
+#[inline]
+pub fn dot_f32_i8(x: &[f32], q: &[i8], scale: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        return unsafe { avx::dot_f32_i8(x, q) } * scale;
+    }
+    let mut s = 0f32;
+    for i in 0..x.len() {
+        s += x[i] * q[i] as f32;
+    }
+    s * scale
+}
+
+/// y += a * q_i8
+#[inline]
+pub fn axpy_i8(y: &mut [f32], q: &[i8], a: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        return unsafe { avx::axpy_i8(y, q, a) };
+    }
+    for (yi, &qi) in y.iter_mut().zip(q) {
+        *yi += a * qi as f32;
+    }
+}
+
+/// Attention over an int8 KV cache. Identical math to attention_multi; K and V rows carry one
+/// scale per (position, kv head), so the cache costs ~1.03 bytes per value instead of 4.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_multi_q8(q: &[f32], kv: &[(&[i8], &[f32], &[i8], &[f32], usize)], stride: usize, heads: usize, kv_heads: usize, hd: usize, out: &mut [f32]) {
+    let group = heads / kv_heads;
+    let scale = 1.0 / (hd as f32).sqrt();
+    let qd = heads * hd;
+    let op = SendPtr(out.as_mut_ptr());
+    let m = kv.len();
+    pool::global().run(m * heads, &|c| {
+        let (j, hi) = (c / heads, c % heads);
+        let (kc, ks, vc, vs, pos) = kv[j];
+        let kvi = hi / group;
+        let qh = &q[j * qd + hi * hd..j * qd + (hi + 1) * hd];
+        let mut scores = vec![0f32; pos + 1];
+        for t in 0..=pos {
+            let kb = t * stride + kvi * hd;
+            scores[t] = dot_f32_i8(qh, &kc[kb..kb + hd], ks[t * kv_heads + kvi]) * scale;
+        }
+        softmax(&mut scores);
+        let mut o = vec![0f32; hd];
+        for t in 0..=pos {
+            let vb = t * stride + kvi * hd;
+            axpy_i8(&mut o, &vc[vb..vb + hd], scores[t] * vs[t * kv_heads + kvi]);
+        }
+        unsafe { std::ptr::copy_nonoverlapping(o.as_ptr(), op.get().add(j * qd + hi * hd), hd) };
+    });
+}
+
+/// Quantize one head vector to int8, returning its scale.
+pub fn quantize_head(x: &[f32], out: &mut [i8]) -> f32 {
+    let amax = x.iter().fold(0f32, |a, &b| a.max(b.abs()));
+    let scale = amax / 127.0;
+    let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+    for (o, &v) in out.iter_mut().zip(x) {
+        *o = (v * inv).round().clamp(-127.0, 127.0) as i8;
+    }
+    scale
 }
 
 /// Attention for many query items at once: one pool job over (item x head) pairs.

@@ -80,6 +80,10 @@ Speculative decoding: `MTP_K` (self-speculation with the checkpoint's multi-toke
 head, default 1 when present, 0 disables), `NGRAM`/`NGRAM_N`/`NGRAM_K` (prompt lookup),
 `DRAFT_MODEL`+`SPEC_K` (separate draft model).
 
+Memory: `KV8=0` keeps the f32 KV cache (default is int8: ~1.03 bytes per value instead of 4,
+so 32k context on a 27B costs ~1 GB instead of ~4 GB). `INT8_GEMM=4` enables the int8 prefill
+path — measured ~20% SLOWER than the tiled f32 path on AVX2, it needs AVX-512 VNNI to win.
+
 Engine env: `DEVICE=auto|cpu|gpu`, `GPU_MEM_MB`, `MAX_CONTEXT`, `QUANT=q8|q4|bf16`, `THREADS`,
 `NGRAM`, `DRAFT_MODEL`+`SPEC_K`, `WCACHE=0` (disable the quantized weight cache), `STATIC`, `PIN`,
 `FORCE_SIMD=0|1|2`, `PROFILE=1`, `LAYER_DEBUG=1`.

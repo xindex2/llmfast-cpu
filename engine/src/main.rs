@@ -271,6 +271,30 @@ fn bench() {
         let dt = t.elapsed().as_secs_f64() / iters as f64;
         eprintln!("matmul  m={m:<3} {n}x{k}: {:.2} ms  {:.1} GFLOPS", dt * 1e3, (2 * m * n * k) as f64 / dt / 1e9);
     }
+    // int8 GEMM vs the f32 path, same data — and check they agree
+    let qm0 = kernels::QMat::from_bf16(&w, n, k);
+    {
+        let m = 8usize;
+        let xs: Vec<f32> = (0..m * k).map(|i| ((i * 7) % 23) as f32 * 0.05 - 0.5).collect();
+        let (mut a, mut b) = (vec![0f32; m * n], vec![0f32; m * n]);
+        kernels::matmul_q8(&qm0, &xs, m, &mut a);
+        kernels::matmul_q8_int8(&qm0, &kernels::quantize_act(&xs, m, k), m, &mut b);
+        let scale = a.iter().fold(0f32, |x, &y| x.max(y.abs())).max(1.0);
+        let err = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        eprintln!("int8 vs f32 matmul: max abs err {err:.5} ({:.3}% of peak {scale:.2})", err / scale * 100.0);
+    }
+    for m in [8usize, 32, 128] {
+        let xs: Vec<f32> = (0..m * k).map(|i| (i % 13) as f32 * 0.01).collect();
+        let mut ys = vec![0f32; m * n];
+        let xq = kernels::quantize_act(&xs, m, k);
+        let iters = 20;
+        let t = Instant::now();
+        for _ in 0..iters {
+            kernels::matmul_q8_int8(&qm0, &xq, m, &mut ys);
+        }
+        let dt = t.elapsed().as_secs_f64() / iters as f64;
+        eprintln!("matmul_i8 m={m:<3} {n}x{k}: {:.2} ms  {:.1} GFLOPS", dt * 1e3, (2 * m * n * k) as f64 / dt / 1e9);
+    }
     let qm = kernels::QMat::from_bf16(&w, n, k);
     kernels::matvec_q8(&qm, &x, &mut y);
     let t = Instant::now();

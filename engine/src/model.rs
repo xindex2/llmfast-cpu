@@ -18,6 +18,26 @@ pub fn set_progress(done: usize, total: usize) {
     LOAD_PROGRESS.store(permille.min(1000), Ordering::Relaxed);
 }
 
+/// int8 KV cache: 4x less memory for the same context (KV8=0 to keep f32).
+pub fn kv_int8() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KV8").map_or(true, |v| v != "0"))
+}
+
+/// Smallest batch for the int8 GEMM path. Off by default: measured on AVX2 it is ~20% SLOWER
+/// than the tiled f32 path (maddubs+madd+rescale costs as many instructions per MAC as FMA).
+/// The win needs AVX-512 VNNI, where one dpbusd does 64 MACs — set INT8_GEMM=4 on such a box
+/// and compare with --bench before trusting it.
+fn int8_gemm_min() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| match std::env::var("INT8_GEMM").as_deref() {
+        Ok("0") | Err(_) => usize::MAX,
+        Ok(v) => v.parse().unwrap_or(4),
+    })
+}
+
 /// A linear layer's weights in whichever format we're running.
 pub enum Weight {
     Bf16 { w: Vec<u16>, n: usize, k: usize },
@@ -93,7 +113,16 @@ impl Weight {
     pub fn matmul(&self, xs: &[f32], m: usize, ys: &mut [f32]) {
         match self {
             Weight::Bf16 { w, n, k } => matmul_bf16(w, xs, m, *n, *k, ys),
-            Weight::Q8(q) => matmul_q8(q, xs, m, ys),
+            Weight::Q8(q) => {
+                // Prefill is compute-bound: with several rows to multiply it pays to quantize the
+                // activations once and keep the whole product in int8/int32 (INT8_GEMM=0 to disable).
+                if m >= int8_gemm_min() {
+                    let xq = quantize_act(xs, m, q.k);
+                    matmul_q8_int8(q, &xq, m, ys)
+                } else {
+                    matmul_q8(q, xs, m, ys)
+                }
+            }
             Weight::Q4(q) => matmul_q4(q, xs, m, ys),
         }
     }
@@ -275,6 +304,9 @@ pub struct Model {
 #[derive(Clone)]
 pub(crate) enum LayerCache {
     Kv { k: Vec<f32>, v: Vec<f32> },                 // pos * stride, growable
+    /// int8 KV: one scale per (position, kv head). ~1.03 bytes per value instead of 4, which is
+    /// what makes long context fit in RAM (32k on a 27B: 4 GB -> 1 GB).
+    Kv8 { k: Vec<i8>, v: Vec<i8>, ks: Vec<f32>, vs: Vec<f32> },
     Lin { state: Vec<f32>, conv: Vec<f32> },         // nv*dk*dv, conv_dim*(conv_k-1); empty until first use
 }
 
@@ -282,6 +314,7 @@ pub(crate) enum LayerCache {
 pub struct KvCache {
     pub(crate) layers: Vec<LayerCache>,
     pub(crate) stride: usize,
+    pub(crate) kv_heads: usize,
     pub len: usize,
     hybrid: bool,
 }
@@ -290,17 +323,22 @@ impl KvCache {
     pub fn new(cfg: &Config) -> KvCache {
         let stride = cfg.kv_heads * cfg.head_dim;
         let layers = (0..cfg.layers).map(|l| if cfg.is_full(l) {
-            LayerCache::Kv { k: Vec::new(), v: Vec::new() }
+            if kv_int8() {
+                LayerCache::Kv8 { k: Vec::new(), v: Vec::new(), ks: Vec::new(), vs: Vec::new() }
+            } else {
+                LayerCache::Kv { k: Vec::new(), v: Vec::new() }
+            }
         } else {
             LayerCache::Lin { state: Vec::new(), conv: Vec::new() }
         }).collect();
         let hybrid = cfg.lin.is_some();
-        KvCache { layers, stride, len: 0, hybrid }
+        KvCache { layers, stride, kv_heads: cfg.kv_heads, len: 0, hybrid }
     }
 
     pub fn bytes(&self) -> usize {
         self.layers.iter().map(|l| match l {
             LayerCache::Kv { k, .. } => k.capacity() * 8,
+            LayerCache::Kv8 { k, ks, .. } => k.capacity() * 2 + ks.capacity() * 8,
             LayerCache::Lin { state, conv } => (state.capacity() + conv.capacity()) * 4,
         }).sum()
     }
@@ -314,9 +352,18 @@ impl KvCache {
     pub fn truncate(&mut self, n: usize) {
         assert!(self.can_truncate(n), "cannot roll back recurrent state ({} -> {n})", self.len);
         for l in &mut self.layers {
-            if let LayerCache::Kv { k, v } = l {
-                k.truncate(n * self.stride);
-                v.truncate(n * self.stride);
+            match l {
+                LayerCache::Kv { k, v } => {
+                    k.truncate(n * self.stride);
+                    v.truncate(n * self.stride);
+                }
+                LayerCache::Kv8 { k, v, ks, vs } => {
+                    k.truncate(n * self.stride);
+                    v.truncate(n * self.stride);
+                    ks.truncate(n * self.kv_heads);
+                    vs.truncate(n * self.kv_heads);
+                }
+                LayerCache::Lin { .. } => {}
             }
         }
         self.len = n;
@@ -743,6 +790,15 @@ impl Model {
                             v.resize(need, 0.0);
                         }
                     }
+                    LayerCache::Kv8 { k, v, ks, vs } => {
+                        if k.len() < need {
+                            k.resize(need, 0);
+                            v.resize(need, 0);
+                            let sneed = (caches[sq].len + n) * c.kv_heads;
+                            ks.resize(sneed, 0.0);
+                            vs.resize(sneed, 0.0);
+                        }
+                    }
                     LayerCache::Lin { state, conv } => {
                         if let Some(lin) = &c.lin {
                             if state.is_empty() {
@@ -825,9 +881,19 @@ impl Model {
                             rmsnorm(kh, k_norm, c.eps);
                             rope_tab(&mut kh[..c.rotary_dim], cs, sn);
                         }
-                        if let LayerCache::Kv { k: ck, v: cv } = &mut caches[items[j].1].layers[li] {
-                            ck[p * stride..(p + 1) * stride].copy_from_slice(&k[j * kd..(j + 1) * kd]);
-                            cv[p * stride..(p + 1) * stride].copy_from_slice(&v[j * kd..(j + 1) * kd]);
+                        match &mut caches[items[j].1].layers[li] {
+                            LayerCache::Kv { k: ck, v: cv } => {
+                                ck[p * stride..(p + 1) * stride].copy_from_slice(&k[j * kd..(j + 1) * kd]);
+                                cv[p * stride..(p + 1) * stride].copy_from_slice(&v[j * kd..(j + 1) * kd]);
+                            }
+                            LayerCache::Kv8 { k: ck, v: cv, ks, vs } => {
+                                for hh in 0..kvh {
+                                    let (src, dst) = (j * kd + hh * hd, p * stride + hh * hd);
+                                    ks[p * kvh + hh] = quantize_head(&k[src..src + hd], &mut ck[dst..dst + hd]);
+                                    vs[p * kvh + hh] = quantize_head(&v[src..src + hd], &mut cv[dst..dst + hd]);
+                                }
+                            }
+                            LayerCache::Lin { .. } => {}
                         }
                     }
                     lap(1, &mut tick);
@@ -847,16 +913,30 @@ impl Model {
                             &q
                         };
                         let qgathered: Vec<f32> = qbuf[..m * qd].to_vec();
-                        let kv: Vec<(&[f32], &[f32], usize)> = (0..m).map(|j| {
-                            match &caches[items[j].1].layers[li] {
-                                LayerCache::Kv { k: ck, v: cv } => {
-                                    let end = (pos[j] + 1) * stride;
-                                    (&ck[..end], &cv[..end], pos[j])
+                        // dispatch on how this layer's cache stores K/V (f32 or int8 + scales)
+                        if matches!(caches[items[0].1].layers[li], LayerCache::Kv8 { .. }) {
+                            let kv: Vec<(&[i8], &[f32], &[i8], &[f32], usize)> = (0..m).map(|j| {
+                                match &caches[items[j].1].layers[li] {
+                                    LayerCache::Kv8 { k, v, ks, vs } => {
+                                        let (end, se) = ((pos[j] + 1) * stride, (pos[j] + 1) * kvh);
+                                        (&k[..end], &ks[..se], &v[..end], &vs[..se], pos[j])
+                                    }
+                                    _ => unreachable!(),
                                 }
-                                _ => unreachable!(),
-                            }
-                        }).collect();
-                        attention_multi(&qgathered, &kv, stride, h, kvh, hd, &mut attn);
+                            }).collect();
+                            attention_multi_q8(&qgathered, &kv, stride, h, kvh, hd, &mut attn);
+                        } else {
+                            let kv: Vec<(&[f32], &[f32], usize)> = (0..m).map(|j| {
+                                match &caches[items[j].1].layers[li] {
+                                    LayerCache::Kv { k: ck, v: cv } => {
+                                        let end = (pos[j] + 1) * stride;
+                                        (&ck[..end], &cv[..end], pos[j])
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }).collect();
+                            attention_multi(&qgathered, &kv, stride, h, kvh, hd, &mut attn);
+                        }
                     }
                     if *gate {
                         for j in 0..m {
@@ -1235,7 +1315,7 @@ impl Model {
             }
             let (ck, cv) = match &cache.layers[0] {
                 LayerCache::Kv { k, v } => (k, v),
-                _ => return None,
+                _ => return None, // the MTP head keeps an f32 cache (see mtp_cache)
             };
             let end = (pos + 1) * stride;
             attention_multi(&qg, &[(&ck[..end], &cv[..end], pos)], stride, h, kvh, hd, &mut attn);
@@ -1281,7 +1361,10 @@ impl Model {
         cfg.layers = 1;
         cfg.layer_types = vec![true];
         cfg.lin = None;
-        KvCache::new(&cfg)
+        let mut c = KvCache::new(&cfg);
+        // one layer, a few positions: not worth quantizing, and it keeps mtp_forward simple
+        c.layers = vec![LayerCache::Kv { k: Vec::new(), v: Vec::new() }];
+        c
     }
 
     pub fn has_mtp(&self) -> bool {
@@ -1369,7 +1452,7 @@ mod tests {
     fn tiny_moe() -> Model {
         let config = Config { hidden: 64, intermediate: 128, layers: 2, heads: 4, kv_heads: 2, head_dim: 16, vocab: 100,
             rope_theta: 10000.0, eps: 1e-6, max_context: 64, num_experts: 8, experts_per_tok: 2, moe_intermediate: 32, norm_topk_prob: true,
-            rotary_dim: 16, attn_gate: false, layer_types: Vec::new(), lin: None, prefix: "model.".into() };
+            rotary_dim: 16, attn_gate: false, layer_types: Vec::new(), lin: None, prefix: "model.".into(), norm_offset: 0.0 };
         let hd = config.head_dim;
         let layers = (0..config.layers).map(|l| Layer {
             ln1: vec![1.0; config.hidden],
@@ -1390,7 +1473,7 @@ mod tests {
         }).collect();
         let inv_freq = (0..hd / 2).map(|i| 1.0 / config.rope_theta.powf(2.0 * i as f32 / hd as f32)).collect();
         let embed = match rand_w(config.vocab, config.hidden, 999) { Weight::Bf16 { w, .. } => w, _ => unreachable!() };
-        Model { lm_head: Weight::Bf16 { w: embed.clone(), n: config.vocab, k: config.hidden }, embed, norm: vec![1.0; config.hidden], layers, inv_freq, config }
+        Model { mtp: None, lm_head: Weight::Bf16 { w: embed.clone(), n: config.vocab, k: config.hidden }, embed, norm: vec![1.0; config.hidden], layers, inv_freq, config }
     }
 
     #[test]
