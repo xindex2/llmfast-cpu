@@ -101,7 +101,24 @@ checkpoint (`.llmfast-cache-<quant>.bin`), so a 27B starts in ~20 s instead of ~
 - **Dashboard**: today / 7d / custom period, uptime, failures, earnings.
 - Logs: `journalctl -u llmfast-gateway -f` and `<models dir>/<model>/engine.log`.
 
-## 7. Useful settings (`/opt/llmfast/gateway.env`)
+## 7. Choosing `quant`
+
+`q4` halves the bytes read per token, which is the right trade on hardware with AVX2 — decode
+is memory-bound there. On older Xeons without AVX2 (Sandy/Ivy Bridge, `simd: level 1` in the
+engine log) unpacking nibbles costs more than the bandwidth it saves, and `q8` is both faster
+and higher quality. Measure rather than assume:
+
+```bash
+./engine/llmfast-engine --bench | head -4
+```
+
+The first line is a pure memory-read ceiling at the same footprint as the matvecs below it.
+A matvec close to the ceiling is memory-bound — only more memory channels will help. One well
+under it is limited by the kernel, not the box. Pick the quant with the lower **ms**, not the
+higher GB/s: `q4` moves fewer bytes, so it can show a lower GB/s while being the faster option,
+or a higher one while being slower.
+
+## 8. Useful settings (`/opt/llmfast/gateway.env`)
 
 | variable | why |
 |---|---|

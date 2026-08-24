@@ -247,6 +247,14 @@ fn cli(engine: &server::Engine, prompt: &str) {
 /// on a two-socket box, compare `NUMA=1` (default) against `NUMA=0`.
 fn bench_stream() {
     use std::time::Instant;
+    // The ceiling first, so every number below can be read as a fraction of it. Sized to the
+    // same footprint as the matvecs below: a much larger probe would see no cache reuse at all
+    // and report a ceiling the matvecs could then appear to "exceed".
+    let probe_mb = 72usize;
+    let (dt, sink) = kernels::read_bandwidth(probe_mb << 20);
+    let peak = (probe_mb << 20) as f64 / dt / 1e9;
+    eprintln!("memory read ceiling ({probe_mb} MB, no arithmetic): {peak:.1} GB/s  (sink {sink:x})");
+
     let (n, k) = (8192usize, 8192usize);
     let w: Vec<u16> = (0..n * k).map(|i| (((i * 2654435761usize) >> 11) % 4001) as u16 + 15000).collect();
     let x: Vec<f32> = (0..k).map(|i| (i % 17) as f32 * 0.01).collect();
@@ -269,15 +277,16 @@ fn bench_stream() {
             run(&x, &mut y);
         }
         let dt = t.elapsed().as_secs_f64() / iters as f64;
+        let gbs = bytes as f64 / dt / 1e9;
         eprintln!(
-            "matvec_{name} {n}x{k} ({:.0} MB, exceeds L3): {:.2} ms  {:.1} GB/s  -> {:.1} tok/s for a model of this size",
+            "matvec_{name} {n}x{k} ({:.0} MB, exceeds L3): {:.2} ms  {gbs:.1} GB/s  ({:.0}% of ceiling)  -> {:.1} tok/s for a model of this size",
             bytes as f64 / 1e6,
             dt * 1e3,
-            bytes as f64 / dt / 1e9,
+            gbs / peak * 100.0,
             1.0 / dt,
         );
     }
-    eprintln!("  (dual-socket: compare against NUMA=0 — the gap is remote-memory traffic)");
+    eprintln!("  (near 100% of ceiling = memory-bound, only more channels help; well under = the kernel has headroom)");
 }
 
 fn bench() {

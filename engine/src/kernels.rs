@@ -65,6 +65,50 @@ fn per_owner_rows(bytes: usize, rows: usize, f: impl Fn(usize, usize) + Sync) ->
 
 /// A zeroed `Vec<T>` of `elems` elements whose pages are first touched by the workers that
 /// will own those rows. Use instead of `vec![zero; elems]` for anything the kernels stream.
+/// Pure memory read bandwidth: the same pool, the same row-chunk split, no arithmetic beyond
+/// an xor so the loads cannot be optimised away. This is the ceiling every kernel is measured
+/// against — if a matvec reaches it, the kernel is done and only more memory channels help;
+/// if it falls well short, the kernel is the bottleneck, not the box.
+pub fn read_bandwidth(bytes: usize) -> (f64, u64) {
+    let elems = bytes / 8;
+    let rows = 4096;
+    let buf: Vec<u64> = alloc_rows(elems, rows);
+    let per_row = elems / rows;
+    let chunks = (rows + ROWS_PER_CHUNK - 1) / ROWS_PER_CHUNK;
+    let mut sums = vec![0u64; chunks];
+    let sp = SendBytes(sums.as_mut_ptr() as *mut u8);
+    let bp = &buf;
+    let run = || {
+        pool::global().run_static(chunks, &|c| {
+            let r0 = c * ROWS_PER_CHUNK;
+            let r1 = (r0 + ROWS_PER_CHUNK).min(rows);
+            // Eight independent accumulators: a single `acc ^= v` chain is latency-bound on
+            // the xor, not on memory, and would understate the ceiling badly.
+            let src = &bp[r0 * per_row..r1 * per_row];
+            let mut acc = [0u64; 8];
+            let mut it = src.chunks_exact(8);
+            for w in &mut it {
+                for j in 0..8 {
+                    acc[j] ^= w[j];
+                }
+            }
+            let mut a = acc.iter().fold(0u64, |x, y| x ^ y);
+            for v in it.remainder() {
+                a ^= *v;
+            }
+            unsafe { *(sp.get() as *mut u64).add(c) = a };
+        });
+    };
+    run(); // warm: fault every page in before timing
+    let t = std::time::Instant::now();
+    let iters = 5;
+    for _ in 0..iters {
+        run();
+    }
+    let dt = t.elapsed().as_secs_f64() / iters as f64;
+    (dt, sums.iter().fold(0u64, |a, b| a ^ b))
+}
+
 pub fn alloc_rows<T: Copy>(elems: usize, rows: usize) -> Vec<T> {
     let mut v: Vec<T> = Vec::with_capacity(elems);
     let bytes = elems * std::mem::size_of::<T>();
