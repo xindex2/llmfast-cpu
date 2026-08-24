@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { Play } from '../icons'
 
 export default function Benchmarks() {
   const [list, setList] = useState([])
@@ -28,7 +29,7 @@ export default function Benchmarks() {
         <label>concurrency<input type="number" value={cfg.concurrency} onChange={set('concurrency')} style={{ width: 80 }} /></label>
         <label>requests<input type="number" value={cfg.requests} onChange={set('requests')} style={{ width: 80 }} /></label>
         <label>max tokens<input type="number" value={cfg.max_tokens} onChange={set('max_tokens')} style={{ width: 90 }} /></label>
-        <button className="primary" onClick={run} disabled={busy}>{busy ? 'running…' : 'run benchmark'}</button>
+        <button className="primary" onClick={run} disabled={busy}>{busy ? 'Running…' : <><Play /> Run benchmark</>}</button>
       </div>
       {err && <p className="bad">{err}</p>}
       <div className="row"><label>server cost $/month (for the profit column)<input type="number" value={serverCost} onChange={(e) => setServerCost(+e.target.value)} style={{ width: 110 }} /></label></div>

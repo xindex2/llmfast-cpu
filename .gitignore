@@ -6,3 +6,4 @@ gateway/forge-gateway
 models/
 engine/forge-engine
 .tmp/
+.md-check.cjs

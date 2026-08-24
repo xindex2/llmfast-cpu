@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, cfg } from '../api'
+import { Key, Trash, Logout } from '../icons'
 
 const usd = (n) => '$' + (n || 0).toFixed(4)
 
@@ -69,15 +70,15 @@ export default function Account() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 8 }}>
           <div className="label" style={{ flex: 1 }}>API keys</div>
-          <button className="primary" onClick={newKey}>Create key</button>
-          <button className="ghost" onClick={() => api.logout().then(load)}>Sign out</button>
+          <button className="primary" onClick={newKey}><Key /> Create key</button>
+          <button className="ghost" onClick={() => api.logout().then(load)}><Logout /> Sign out</button>
         </div>
         <table><tbody>{me.keys.map((k) => (
           <tr key={k.prefix}>
             <td><code>{k.prefix}</code></td>
             <td className="muted">{k.name}</td>
             <td className="muted">{k.last_used ? 'used ' + new Date(k.last_used).toLocaleDateString() : 'never used'}</td>
-            <td><button className="ghost" onClick={() => revoke(k.prefix)}>Revoke</button></td>
+            <td><button className="ghost" onClick={() => revoke(k.prefix)}><Trash /> Revoke</button></td>
           </tr>))}</tbody></table>
         {!me.keys.length && <p className="muted">no keys yet</p>}
       </div>

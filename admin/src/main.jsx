@@ -10,6 +10,7 @@ import Models from './pages/Models'
 import Users from './pages/Users'
 import Account from './pages/Account'
 import Launch from './pages/Launch'
+import { Bolt } from './icons'
 
 const pages = { Dashboard, Playground, Models, Benchmarks, Earnings, Users, Account, Launch, Settings }
 
@@ -37,7 +38,7 @@ function App() {
   return (
     <div className="app">
       <nav>
-        <div className="brand"><span className="bolt">⚡</span> llmfa.st</div>
+        <div className="brand"><Bolt size={18} /> llmfa.st</div>
         {Object.keys(pages).map((p) => <button key={p} className={p === page ? 'active' : ''} onClick={() => setPage(p)}>{p}</button>)}
       </nav>
       <main>

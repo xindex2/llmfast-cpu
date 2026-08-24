@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { Play, Stop, Trash, Download, Save, Refresh } from '../icons'
 
 const gb = (b) => (b / 1e9).toFixed(2) + ' GB'
 
@@ -37,7 +38,7 @@ export default function Models() {
           <label>input $/M<input type="number" step="0.001" value={form.prompt_price_per_m} onChange={set('prompt_price_per_m')} style={{ width: 100 }} /></label>
           <label>output $/M<input type="number" step="0.001" value={form.completion_price_per_m} onChange={set('completion_price_per_m')} style={{ width: 100 }} /></label>
           <label>cache read $/M<input type="number" step="0.001" value={form.cached_price_per_m} onChange={set('cached_price_per_m')} style={{ width: 100 }} /></label>
-          <button className="primary" onClick={add} disabled={busy === 'add' || !form.hf_id}>add & download</button>
+          <button className="primary" onClick={add} disabled={busy === 'add' || !form.hf_id}><Download /> Add & download</button>
         </div>
       </div>
       {err && <p className="bad">{err}</p>}
@@ -71,10 +72,10 @@ function ModelCard({ m, busy, action, save, models }) {
             <div style={{ height: 6, width: `${((m.status === 'starting' ? m.load_progress : m.progress) || 0) * 100}%`, background: 'var(--accent)', borderRadius: 3, transition: 'width .4s' }} />
           </div>}
         </div>
-        {m.status === 'ready' && <button className="primary" onClick={() => action(m.id, 'start')} disabled={!!busy}>start engine</button>}
-        {(m.status === 'running' || m.status === 'starting') && <button className="danger" onClick={() => action(m.id, 'stop')} disabled={!!busy}>stop</button>}
-        {m.status === 'error' && <button className="primary" onClick={() => action(m.id, 'retry')} disabled={!!busy}>retry download</button>}
-        <button className="ghost" onClick={() => { if (confirm(`Remove ${m.id}? (files are kept)`)) action(m.id, 'delete') }} disabled={!!busy}>remove</button>
+        {m.status === 'ready' && <button className="primary" onClick={() => action(m.id, 'start')} disabled={!!busy}><Play /> Start engine</button>}
+        {(m.status === 'running' || m.status === 'starting') && <button className="danger" onClick={() => action(m.id, 'stop')} disabled={!!busy}><Stop /> Stop</button>}
+        {m.status === 'error' && <button className="primary" onClick={() => action(m.id, 'retry')} disabled={!!busy}><Refresh /> Retry download</button>}
+        <button className="ghost" onClick={() => { if (confirm(`Remove ${m.id}? (files are kept)`)) action(m.id, 'delete') }} disabled={!!busy}><Trash /> Remove</button>
       </div>
       <div className="row" style={{ marginBottom: 0 }}>
         <label>input $/M<input type="number" step="0.001" value={e.prompt_price_per_m} onChange={set('prompt_price_per_m')} style={{ width: 90 }} /></label>
@@ -84,7 +85,7 @@ function ModelCard({ m, busy, action, save, models }) {
         <label>quant<select value={e.quant} onChange={set('quant')}><option>q8</option><option>q4</option><option>bf16</option></select></label>
         <label>device<select value={e.device || 'auto'} onChange={set('device')}><option value="auto">auto</option><option value="cpu">cpu</option><option value="gpu">gpu</option></select></label>
         <label>draft model (speculative)<select value={e.draft || ''} onChange={set('draft')}><option value="">none</option>{models.filter((x) => x.id !== m.id && x.status !== 'downloading' && x.status !== 'error').map((x) => <option key={x.id} value={x.dir}>{x.id}</option>)}</select></label>
-        <button className="primary" onClick={() => save({ ...e, prompt_price_per_m: +e.prompt_price_per_m, completion_price_per_m: +e.completion_price_per_m, cached_price_per_m: +e.cached_price_per_m, context_length: +e.context_length })} disabled={!dirty}>save{m.status === 'running' && dirty ? ' (restart engine to apply quant/context/draft/device)' : ''}</button>
+        <button className="primary" onClick={() => save({ ...e, prompt_price_per_m: +e.prompt_price_per_m, completion_price_per_m: +e.completion_price_per_m, cached_price_per_m: +e.cached_price_per_m, context_length: +e.context_length })} disabled={!dirty}><Save /> Save{m.status === 'running' && dirty ? ' (restart to apply)' : ''}</button>
       </div>
     </div>
   )

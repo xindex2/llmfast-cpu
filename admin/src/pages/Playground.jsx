@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, streamChat } from '../api'
+import Markdown from '../md'
+import { Send, Stop, Trash } from '../icons'
 
 export default function Playground() {
   const [models, setModels] = useState([])
@@ -55,13 +57,15 @@ export default function Playground() {
         <label>temperature<input type="number" step="0.1" min="0" max="2" value={temp} onChange={(e) => setTemp(e.target.value)} style={{ width: 80 }} /></label>
         <label>max tokens<input type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} style={{ width: 90 }} /></label>
         <label style={{ flex: 1 }}>system prompt<input value={system} onChange={(e) => setSystem(e.target.value)} /></label>
-        <button className="ghost" onClick={() => { setMsgs([]); setStat(null) }}>clear</button>
+        <button className="ghost" onClick={() => { setMsgs([]); setStat(null) }}><Trash /> Clear</button>
       </div>
 
       <div className="chat">
         {msgs.map((m, i) => <div key={i} className={`msg ${m.role}`}>
-          {m.reasoning && <div className="think">{m.reasoning}</div>}
-          {m.content || (busy && !m.reasoning ? '▍' : '')}
+          {m.reasoning && <details className="think" open><summary>reasoning</summary><Markdown text={m.reasoning} /></details>}
+          {m.role === 'assistant'
+            ? (m.content ? <Markdown text={m.content} /> : (busy && !m.reasoning ? <span className="caret">▍</span> : null))
+            : m.content}
         </div>)}
         <div ref={bottom} />
       </div>
@@ -71,8 +75,8 @@ export default function Playground() {
       <div className="row">
         <textarea rows={3} value={input} placeholder="Message… (Enter to send, Shift+Enter for newline)" onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} style={{ flex: 1 }} />
-        {busy ? <button className="danger" onClick={() => abort.current?.abort()}>stop</button>
-              : <button className="primary" onClick={send} disabled={!model}>send</button>}
+        {busy ? <button className="danger" onClick={() => abort.current?.abort()}><Stop /> Stop</button>
+              : <button className="primary" onClick={send} disabled={!model}><Send /> Send</button>}
       </div>
     </>
   )

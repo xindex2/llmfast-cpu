@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { Plus } from '../icons'
 
 const usd = (n) => '$' + (n || 0).toFixed(2)
 
@@ -32,7 +33,7 @@ export default function Users() {
               <td>{usd(u.spent_usd)}</td>
               <td>{usage.requests}</td>
               <td>{usage.prompt_tokens + usage.completion_tokens}</td>
-              <td><button className="ghost" onClick={() => topup(u.id)}>+ {usd(+amount)}</button></td>
+              <td><button className="ghost" onClick={() => topup(u.id)}><Plus /> {usd(+amount)}</button></td>
             </tr>))}</tbody>
         </table>
         {!rows.length && <p className="muted">no customers yet — they sign up at /signup with the site's API</p>}
