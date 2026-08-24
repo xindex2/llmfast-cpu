@@ -138,7 +138,7 @@ impl Config {
             prefix,
             hidden: u("hidden_size"),
             intermediate: u("intermediate_size"),
-            layers: u("num_hidden_layers"),
+            layers: std::env::var("NUM_LAYERS").ok().and_then(|v| v.parse().ok()).map(|n: usize| n.min(u("num_hidden_layers"))).unwrap_or_else(|| u("num_hidden_layers")),
             heads,
             kv_heads: u("num_key_value_heads"),
             head_dim,
@@ -499,6 +499,11 @@ impl Model {
         }
         let profile = std::env::var("PROFILE").is_ok();
         let layer_debug = std::env::var("LAYER_DEBUG").is_ok();
+        if layer_debug {
+            let x0 = &x[(m - 1) * c.hidden..m * c.hidden];
+            let norm = x0.iter().map(|v| v * v).sum::<f32>().sqrt();
+            eprintln!("embed      |x|={norm:10.3} first4=[{:.4}, {:.4}, {:.4}, {:.4}]", x0[0], x0[1], x0[2], x0[3]);
+        }
         let mut tm = [0f64; 6]; // qkv, norm+rope+store, attention, o, mlp, head
         let mut tick = std::time::Instant::now();
         let mut lap = |slot: usize, tick: &mut std::time::Instant| {
