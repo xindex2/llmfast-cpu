@@ -19,41 +19,43 @@ fn unpack4(word: u32) -> vec4<f32> {
     return vec4<f32>(f32(b0), f32(b1), f32(b2), f32(b3));
 }
 
-// Interleaved layout: for a tile of 64 rows, word w of row r is at ((tile*words + w)*64 + r%64),
-// so lanes reading the same word land on adjacent addresses → coalesced.
-// Workgroup = 64 rows × KSPLIT k-partitions (512 threads); partials reduced in shared memory.
-const KSPLIT: u32 = 4u;
+// Interleaved layout: for a tile of TILE rows, word w of row r is at ((tile*words + w)*TILE + r%TILE),
+// so lanes reading the same word land on adjacent addresses → coalesced (32 lanes × 4 B = one
+// full 128 B transaction). TILE=32 (not 64): an 8192-row matvec then launches 256 workgroups
+// instead of 128 — an A40 at TILE=64 sat at 17% of its bandwidth for lack of threads in flight.
+const TILE: u32 = 32u;
+const KSPLIT: u32 = 8u;
 var<workgroup> part: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn matvec_q8(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-    let lane = lid.x % 64u;
-    let p = lid.x / 64u;
+    let lane = lid.x % TILE;
+    let p = lid.x / TILE;
     let tile = wid.x;
-    let row = tile * 64u + lane;
+    let row = tile * TILE + lane;
     let words = mp.k / 4u;
     let blocks = mp.k / 32u;
-    let wtile = tile * words * 64u + lane;
-    let stile = tile * blocks * 64u + lane;
+    let wtile = tile * words * TILE + lane;
+    let stile = tile * blocks * TILE + lane;
     for (var j = 0u; j < mcount.m; j = j + 1u) {
         var acc = 0.0;
         let xb = j * mp.k;
         for (var b = p; b < blocks; b = b + KSPLIT) {
             var bacc = 0.0;
-            let wb = wtile + b * 8u * 64u;
+            let wb = wtile + b * 8u * TILE;
             let kb = xb + b * 32u;
             for (var i = 0u; i < 8u; i = i + 1u) {
-                let w4 = unpack4(w_q[wb + i * 64u]);
+                let w4 = unpack4(w_q[wb + i * TILE]);
                 let kk = kb + i * 4u;
                 bacc = bacc + dot(w4, vec4<f32>(xin[kk], xin[kk + 1u], xin[kk + 2u], xin[kk + 3u]));
             }
-            acc = acc + bacc * w_s[stile + b * 64u];
+            acc = acc + bacc * w_s[stile + b * TILE];
         }
         part[lid.x] = acc;
         workgroupBarrier();
         if (p == 0u && row < mp.n) {
             var total = 0.0;
-            for (var q = 0u; q < KSPLIT; q = q + 1u) { total = total + part[q * 64u + lane]; }
+            for (var q = 0u; q < KSPLIT; q = q + 1u) { total = total + part[q * TILE + lane]; }
             yout[j * mp.n + row] = total;
         }
         workgroupBarrier();
@@ -314,34 +316,34 @@ var<workgroup> mv2_part: array<f32, 256>;
 fn moe_matvec_q8(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
     let slot = wid.y;
     let e = mv2_route[slot].x;
-    let lane = lid.x % 64u;
-    let p = lid.x / 64u;
+    let lane = lid.x % TILE;
+    let p = lid.x / TILE;
     let words = mv2_mp.k / 4u;
     let blocks = mv2_mp.k / 32u;
-    let tile = e * (mv2_mp.n / 64u) + wid.x;
-    let wtile = tile * words * 64u + lane;
-    let stile = tile * blocks * 64u + lane;
+    let tile = e * (mv2_mp.n / TILE) + wid.x;
+    let wtile = tile * words * TILE + lane;
+    let stile = tile * blocks * TILE + lane;
     let xrow = select(slot, slot / mv2_mo.topk, mv2_mp._pad == 0u);
     let xb = xrow * mv2_mp.k;
     var acc = 0.0;
     for (var b = p; b < blocks; b = b + KSPLIT) {
         var bacc = 0.0;
-        let wb = wtile + b * 8u * 64u;
+        let wb = wtile + b * 8u * TILE;
         let kb = xb + b * 32u;
         for (var i = 0u; i < 8u; i = i + 1u) {
-            let b0 = mv2_q[wb + i * 64u];
+            let b0 = mv2_q[wb + i * TILE];
             let w4 = vec4<f32>(f32((i32(b0 << 24u)) >> 24u), f32((i32(b0 << 16u)) >> 24u), f32((i32(b0 << 8u)) >> 24u), f32((i32(b0)) >> 24u));
             let kk = kb + i * 4u;
             bacc = bacc + dot(w4, vec4<f32>(mv2_x[kk], mv2_x[kk + 1u], mv2_x[kk + 2u], mv2_x[kk + 3u]));
         }
-        acc = acc + bacc * mv2_s[stile + b * 64u];
+        acc = acc + bacc * mv2_s[stile + b * TILE];
     }
     mv2_part[lid.x] = acc;
     workgroupBarrier();
-    let row = wid.x * 64u + lane;
+    let row = wid.x * TILE + lane;
     if (p == 0u && row < mv2_mp.n) {
         var total = 0.0;
-        for (var q = 0u; q < KSPLIT; q = q + 1u) { total = total + mv2_part[q * 64u + lane]; }
+        for (var q = 0u; q < KSPLIT; q = q + 1u) { total = total + mv2_part[q * TILE + lane]; }
         mv2_y[slot * mv2_mp.n + row] = total;
     }
 }

@@ -498,14 +498,14 @@ impl Model {
     /// v1 GPU backend handles plain Qwen3 dense: softmax attention without gates, full rotary.
     pub fn gpu_supported(&self) -> bool {
         // MoE runs on the GPU when its shapes fit the tiled kernels: every expert's row counts
-        // must be 64-aligned (each expert's tiles are then self-contained inside the one big
+        // must be 32-aligned (each expert's tiles are then self-contained inside the one big
         // concatenated buffer) and the router shader holds at most 256 experts.
         let mlp_ok = self.layers.iter().all(|l| match &l.mlp {
             Mlp::Dense(_) => true,
             Mlp::Moe { .. } => {
                 self.config.num_experts <= 256
-                    && (2 * self.config.moe_intermediate) % 64 == 0
-                    && self.config.hidden % 64 == 0
+                    && (2 * self.config.moe_intermediate) % 32 == 0
+                    && self.config.hidden % 32 == 0
                     && self.config.moe_intermediate % 32 == 0
             }
         });

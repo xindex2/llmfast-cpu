@@ -235,7 +235,7 @@ impl GpuModel {
         let moe = if has_moe {
             let (ne, topk, mi) = (c.num_experts, c.experts_per_tok, c.moe_intermediate);
             assert!(ne <= 256, "router shader holds at most 256 experts");
-            assert!((2 * mi) % 64 == 0 && c.hidden % 64 == 0 && mi % 32 == 0, "MoE shapes must be tile-aligned");
+            assert!((2 * mi) % 32 == 0 && c.hidden % 32 == 0 && mi % 32 == 0, "MoE shapes must be tile-aligned");
             let routing = gpu.storage(MAXM * topk * 8, "routing");
             let gu_moe = st(MAXM * topk * 2 * mi, "gu_moe");
             let act_moe = st(MAXM * topk * mi, "act_moe");
@@ -289,7 +289,7 @@ impl GpuModel {
                     let mb = moe.as_ref().unwrap();
                     let mi = c.moe_intermediate;
                     // one buffer per matrix kind, every expert's rows concatenated: expert e's
-                    // tiles start at e * rows_per_expert/64 because rows_per_expert % 64 == 0
+                    // tiles start at e * rows_per_expert/TILE because rows_per_expert % 32 == 0
                     let gu_parts: Vec<QMat> = experts.iter().map(|e| concat_q8(&[q8(&e.w_gate), q8(&e.w_up)])).collect();
                     let gu_all = concat_q8(&gu_parts.iter().collect::<Vec<_>>());
                     let down_all = concat_q8(&experts.iter().map(|e| q8(&e.w_down)).collect::<Vec<_>>());
@@ -449,7 +449,7 @@ impl GpuModel {
             pass.dispatch_workgroups(m as u32, 1, 1);
             pass.set_pipeline(&self.p.matvec);
             pass.set_bind_group(0, &l.bg_qkv, &[]);
-            pass.dispatch_workgroups(((l.wqkv.n + 63) / 64) as u32, 1, 1);
+            pass.dispatch_workgroups(((l.wqkv.n + 31) / 32) as u32, 1, 1);
             pass.set_pipeline(&self.p.rope);
             pass.set_bind_group(0, &l.bg_rope, &[]);
             pass.dispatch_workgroups((h + kvh) as u32, m as u32, 1);
@@ -467,7 +467,7 @@ impl GpuModel {
             }
             pass.set_pipeline(&self.p.matvec);
             pass.set_bind_group(0, &l.bg_o, &[]);
-            pass.dispatch_workgroups(((l.wo.n + 63) / 64) as u32, 1, 1);
+            pass.dispatch_workgroups(((l.wo.n + 31) / 32) as u32, 1, 1);
             pass.set_pipeline(&self.p.add);
             pass.set_bind_group(0, &self.bg_add_o, &[]);
             pass.dispatch_workgroups(wg(m * c.hidden), 1, 1);
@@ -478,13 +478,13 @@ impl GpuModel {
                 GMlp::Dense { bg_gu, bg_down, wgu, wdown } => {
                     pass.set_pipeline(&self.p.matvec);
                     pass.set_bind_group(0, bg_gu, &[]);
-                    pass.dispatch_workgroups(((wgu.n + 63) / 64) as u32, 1, 1);
+                    pass.dispatch_workgroups(((wgu.n + 31) / 32) as u32, 1, 1);
                     pass.set_pipeline(&self.p.silu);
                     pass.set_bind_group(0, &self.bg_silu, &[]);
                     pass.dispatch_workgroups(wg(m * c.intermediate), 1, 1);
                     pass.set_pipeline(&self.p.matvec);
                     pass.set_bind_group(0, bg_down, &[]);
-                    pass.dispatch_workgroups(((wdown.n + 63) / 64) as u32, 1, 1);
+                    pass.dispatch_workgroups(((wdown.n + 31) / 32) as u32, 1, 1);
                 }
                 GMlp::Moe { bg_router, bg_gu, bg_down, .. } => {
                     let mb = self.moe.as_ref().unwrap();
@@ -495,13 +495,13 @@ impl GpuModel {
                     pass.dispatch_workgroups(m as u32, 1, 1);
                     pass.set_pipeline(&self.p.moe_mv);
                     pass.set_bind_group(0, bg_gu, &[]);
-                    pass.dispatch_workgroups((2 * mi / 64) as u32, slots, 1);
+                    pass.dispatch_workgroups((2 * mi / 32) as u32, slots, 1);
                     pass.set_pipeline(&self.p.silu);
                     pass.set_bind_group(0, &mb.bg_silu, &[]);
                     pass.dispatch_workgroups(wg(m * topk * mi), 1, 1);
                     pass.set_pipeline(&self.p.moe_mv);
                     pass.set_bind_group(0, bg_down, &[]);
-                    pass.dispatch_workgroups((c.hidden / 64) as u32, slots, 1);
+                    pass.dispatch_workgroups((c.hidden / 32) as u32, slots, 1);
                     pass.set_pipeline(&self.p.moe_red);
                     pass.set_bind_group(0, &mb.bg_reduce, &[]);
                     pass.dispatch_workgroups(wg(m * c.hidden), 1, 1);
@@ -522,7 +522,7 @@ impl GpuModel {
             pass.dispatch_workgroups(lasts.len() as u32, 1, 1);
             pass.set_pipeline(&self.p.matvec);
             pass.set_bind_group(0, &self.bg_head, &[]);
-            pass.dispatch_workgroups(((self.lm_head.n + 63) / 64) as u32, 1, 1);
+            pass.dispatch_workgroups(((self.lm_head.n + 31) / 32) as u32, 1, 1);
         }
         gpu.queue.submit([enc.finish()]);
         let logits = gpu.read_f32(&self.logits, lasts.len() * c.vocab);

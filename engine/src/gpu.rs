@@ -98,20 +98,23 @@ impl Gpu {
     /// Upload a Q8 matrix, re-packed into the 64-row interleaved layout the shader expects
     /// (rows padded up to a multiple of 64).
     pub fn upload_q8(&self, q: &[i8], scales: &[f32], n: usize, k: usize) -> GQ8 {
+        // TILE must match shaders.wgsl. 32 rows per tile: 32 lanes x 4 B = one full memory
+        // transaction, and twice the workgroups of the old 64 -- which is what an A40 needs
+        // to get past ~17% of its bandwidth.
         let words = k / 4;
         let blocks = k / 32;
-        let tiles = (n + 63) / 64;
-        let mut qi = vec![0u32; tiles * words * 64];
-        let mut si = vec![0f32; tiles * blocks * 64];
+        let tiles = (n + 31) / 32;
+        let mut qi = vec![0u32; tiles * words * 32];
+        let mut si = vec![0f32; tiles * blocks * 32];
         for r in 0..n {
-            let (tile, lane) = (r / 64, r % 64);
+            let (tile, lane) = (r / 32, r % 32);
             let src = &q[r * k..(r + 1) * k];
             for w in 0..words {
                 let b = &src[w * 4..w * 4 + 4];
-                qi[(tile * words + w) * 64 + lane] = u32::from_le_bytes([b[0] as u8, b[1] as u8, b[2] as u8, b[3] as u8]);
+                qi[(tile * words + w) * 32 + lane] = u32::from_le_bytes([b[0] as u8, b[1] as u8, b[2] as u8, b[3] as u8]);
             }
             for b in 0..blocks {
-                si[(tile * blocks + b) * 64 + lane] = scales[r * blocks + b];
+                si[(tile * blocks + b) * 32 + lane] = scales[r * blocks + b];
             }
         }
         let q = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("q8"), contents: as_bytes(&qi), usage: wgpu::BufferUsages::STORAGE });
@@ -171,7 +174,7 @@ impl Gpu {
         let mut pass = enc.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.matvec_q8);
         pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(((w.n + 63) / 64) as u32, 1, 1);
+        pass.dispatch_workgroups(((w.n + 31) / 32) as u32, 1, 1);
     }
 }
 
