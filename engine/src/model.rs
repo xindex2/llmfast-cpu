@@ -297,6 +297,9 @@ pub struct Model {
     pub(crate) layers: Vec<Layer>,
     pub(crate) norm: Vec<f32>,
     pub(crate) lm_head: Weight, // tied to embed in small models; stored separately so it can be quantized
+    /// (total params, bytes streamed per decode token) — computed exactly at load from the real
+    /// weight objects; kept so diagnostics never re-derive them from config and get them wrong.
+    pub stats: (usize, usize),
 }
 
 /// Per-layer sequence state: KV rows for softmax attention, recurrent state for linear attention.
@@ -625,7 +628,7 @@ impl Model {
         } else {
             None
         };
-        let m = Model {
+        let mut m = Model {
             mtp,
             inv_freq,
             embed: st.bf16(&format!("{}embed_tokens.weight", config.prefix)),
@@ -637,6 +640,7 @@ impl Model {
             },
             layers,
             config,
+            stats: (0, 0),
         };
         // (total params, total bytes, bytes touched per token — for MoE only the active experts count)
         let ex = |e: &Expert| (e.w_gate.params() + e.w_up.params() + e.w_down.params(), e.w_gate.bytes() + e.w_up.bytes() + e.w_down.bytes());
@@ -702,6 +706,7 @@ impl Model {
         }
         eprintln!("loaded {} layers, {:.2}B params, {:.2} GB in RAM, {:.2} GB streamed per token ({quant}) in {:.1}s",
             m.config.layers, params as f64 / 1e9, bytes as f64 / 1e9, active as f64 / 1e9, t0.elapsed().as_secs_f32());
+        m.stats = (params, active);
         m
     }
 
@@ -1481,7 +1486,7 @@ mod tests {
         }).collect();
         let inv_freq = (0..hd / 2).map(|i| 1.0 / config.rope_theta.powf(2.0 * i as f32 / hd as f32)).collect();
         let embed = match rand_w(config.vocab, config.hidden, 999) { Weight::Bf16 { w, .. } => w, _ => unreachable!() };
-        Model { mtp: None, lm_head: Weight::Bf16 { w: embed.clone(), n: config.vocab, k: config.hidden }, embed, norm: vec![1.0; config.hidden], layers, inv_freq, config }
+        Model { mtp: None, lm_head: Weight::Bf16 { w: embed.clone(), n: config.vocab, k: config.hidden }, embed, norm: vec![1.0; config.hidden], layers, inv_freq, config, stats: (0, 0) }
     }
 
     #[test]

@@ -379,21 +379,10 @@ fn bench_model(dir: &str) {
     let model = model::Model::load(dir);
     let _load_s = t0.elapsed().as_secs_f32();
     let cfg = &model.config;
-    let params = cfg.vocab * cfg.hidden + cfg.layers * (cfg.heads * cfg.head_dim * cfg.head_dim + cfg.hidden * cfg.intermediate);
-    let active = if cfg.num_experts > 0 {
-        // MoE: only stream the active experts' parameters per token
-        cfg.layers * (cfg.heads * cfg.head_dim * cfg.head_dim + cfg.experts_per_tok * (3 * cfg.moe_intermediate * cfg.hidden))
-    } else {
-        // Dense: all parameters touched per token
-        params
-    };
-    let quant = std::env::var("QUANT").unwrap_or_else(|_| "bf16".into());
-    let bytes_per_param = match quant.as_str() {
-        "q4" => 0.5,
-        "q8" => 1.0,
-        _ => 2.0, // bf16
-    };
-    let gb_per_token = active as f64 * bytes_per_param / 1e9;
+    // Exact numbers from the loaded weights, not re-derived from config — the first version
+    // re-derived and printed 7.08B for a model the loader itself called 25.62B.
+    let (params, active_bytes) = model.stats;
+    let gb_per_token = active_bytes as f64 / 1e9;
 
     let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
     let prompt = "The future of artificial intelligence";
@@ -419,12 +408,18 @@ fn bench_model(dir: &str) {
     let tok_per_s = n_decode as f32 / decode_s;
 
     let (simd, i8) = kernels::kernel_report();
+    // Achieved bandwidth = bytes streamed per token / step time. Compare directly with the
+    // read ceiling from --bench: near it means memory-bound (done); well under means the time
+    // is going somewhere other than streaming weights — run with PROFILE=1 to see where.
+    let gbs = gb_per_token * tok_per_s as f64;
     eprintln!(
-        "bench-model: {}\n  {:.2}B params · {:.2}B active/token · {:.2} GB/token\n  prefill {:.1}s, decode {} tok in {:.2}s ({:.1} tok/s)\n  build {} · {} threads · simd {} · {} decode",
+        "bench-model: {}\n  {:.2}B params · {:.2} GB streamed/token ({})\n  prefill {} tok in {:.1}s, decode {} tok in {:.2}s ({:.1} tok/s -> {gbs:.1} GB/s achieved)\n  build {} · {} threads · simd {} · {} decode · MoE {}",
         dir,
-        params as f64 / 1e9, active as f64 / 1e9, gb_per_token,
-        prefill_s, n_decode, decode_s, tok_per_s,
-        COMMIT, pool::global().threads(), simd, if i8 { "int8" } else { "float" }
+        params as f64 / 1e9, gb_per_token,
+        std::env::var("QUANT").unwrap_or_else(|_| "bf16".into()),
+        ids.len(), prefill_s, n_decode, decode_s, tok_per_s,
+        COMMIT, pool::global().threads(), simd, if i8 { "int8" } else { "float" },
+        if cfg.num_experts > 0 { format!("{} experts, top-{}", cfg.num_experts, cfg.experts_per_tok) } else { "no (dense)".into() },
     );
 }
 
