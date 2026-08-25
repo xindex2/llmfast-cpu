@@ -56,16 +56,38 @@ pub fn global() -> &'static Pool {
 /// `thread_siblings_list` entries in sysfs; falls back to available_parallelism() elsewhere.
 fn physical_cores() -> usize {
     let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let mut sibs = std::collections::HashSet::new();
-    if let Ok(dir) = std::fs::read_dir("/sys/devices/system/cpu") {
-        for e in dir.flatten() {
-            let p = e.path().join("topology/thread_siblings_list");
-            if let Ok(v) = std::fs::read_to_string(&p) {
-                sibs.insert(v.trim().to_string());
+    // (physical id, core id) pairs from /proc/cpuinfo. The sysfs thread_siblings_list this
+    // used to read reported 30 unique entries on a 2x10-core box that /proc/cpuinfo and lscpu
+    // both call 20 -- and 30 threads on 20 cores is worse than 20, because oversubscribed
+    // threads stall every barrier. cpuinfo is the same source lscpu uses.
+    let mut cores = std::collections::HashSet::new();
+    if let Ok(txt) = std::fs::read_to_string("/proc/cpuinfo") {
+        let (mut pkg, mut core) = (String::new(), String::new());
+        for line in txt.lines() {
+            let Some((k, v)) = line.split_once(':') else {
+                // Blank line ends a processor block; record whatever it declared.
+                if line.trim().is_empty() && !core.is_empty() {
+                    cores.insert(format!("{pkg}/{core}"));
+                    core.clear();
+                }
+                continue;
+            };
+            match k.trim() {
+                "physical id" => pkg = v.trim().to_string(),
+                "core id" => core = v.trim().to_string(),
+                _ => {}
             }
         }
+        if !core.is_empty() {
+            cores.insert(format!("{pkg}/{core}"));
+        }
     }
-    if sibs.is_empty() { logical } else { sibs.len().min(logical).max(1) }
+    // A count that is not a plausible divisor of the logical CPUs means the parse went wrong;
+    // never return more threads than the machine has.
+    if cores.is_empty() || cores.len() > logical {
+        return logical;
+    }
+    cores.len().max(1)
 }
 
 impl Pool {
