@@ -128,11 +128,7 @@ fn run(model: Arc<Net>, draft: Option<Arc<Model>>, rx: Receiver<Request>) {
     let ngram_k: usize = std::env::var("NGRAM_K").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
     let ngram_on = rollback && std::env::var("NGRAM").map_or(true, |v| v != "0");
     // MTP self-speculation: how many tokens the head proposes per step (0 disables).
-    let mtp_k: usize = if model.has_mtp() && rollback {
-        std::env::var("MTP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
-    } else {
-        0
-    };
+    let mtp_k: usize = if model.has_mtp() && rollback { mtp_k() } else { 0 };
     if mtp_k > 0 {
         eprintln!("mtp: self-speculation enabled (MTP_K={mtp_k})");
     }
@@ -383,6 +379,12 @@ fn ngram_draft(toks: &[u32], n: usize, k: usize) -> Option<Vec<u32>> {
         }
     }
     None
+}
+
+/// Tokens the MTP head proposes per step (0 disables). Read here and reported by /health, so
+/// "is speculation on" is answerable without grepping the engine log.
+pub fn mtp_k() -> usize {
+    std::env::var("MTP_K").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
 }
 
 fn greedy(l: &mut [f32]) -> u32 {

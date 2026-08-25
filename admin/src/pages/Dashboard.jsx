@@ -73,7 +73,9 @@ export default function Dashboard() {
           <div className="label">Engines</div>
           <table><tbody>{data.engines.map((e) => (
             <tr key={e.name}>
-              <td>{e.model || '—'}</td>
+              <td>{e.model || '—'}
+                {e.kernel?.quant && <div className="muted small">{kernelLine(e.kernel)}</div>}
+              </td>
               <td className="muted">{e.device || (e.loading ? 'loading' : '?')}</td>
               <td><span className={`pill ${e.healthy ? 'ok' : e.loading ? '' : 'bad'}`}>
                 {e.healthy ? 'healthy' : e.loading ? `loading ${((e.progress || 0) * 100).toFixed(0)}%` : 'down'}
@@ -114,6 +116,21 @@ export default function Dashboard() {
       </div>
     </>
   )
+}
+
+// The engine reports which decode path it is executing. Without this, "is the optimization
+// running" could only be answered by benchmarking beside the server and comparing.
+function kernelLine(k) {
+  const simd = ['scalar', 'AVX', 'AVX2+FMA'][k.simd_level] || `simd ${k.simd_level}`
+  return [
+    `${k.quant} · ${(k.weight_gb || 0).toFixed(1)} GB`,
+    `${k.threads} threads`,
+    simd,
+    k.int8_decode ? 'int8 decode' : 'float decode',
+    k.kv_int8 ? 'int8 KV' : 'f32 KV',
+    k.mtp_k ? `MTP k=${k.mtp_k}` : 'no speculation',
+    `${(k.context / 1024).toFixed(0)}k ctx`,
+  ].join(' · ')
 }
 
 function Card({ label, value, sub }) {

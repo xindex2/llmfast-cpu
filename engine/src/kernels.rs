@@ -992,6 +992,20 @@ fn i8_decode() -> bool {
     false
 }
 
+/// What the decode path is actually doing, for /health. Every performance question so far has
+/// come down to "is the fast path even running", and the only way to answer it was to read a
+/// benchmark on the side and infer. Now the engine says so.
+pub fn kernel_report() -> (u8, bool) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        (simd_level(), i8_decode())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        (0, false)
+    }
+}
+
 pub fn matvec_q8(w: &QMat, x: &[f32], y: &mut [f32]) {
     if i8_decode() && w.k % QBLOCK == 0 {
         return matvec_q8_i8(w, &quantize_vec(x), y);

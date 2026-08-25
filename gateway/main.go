@@ -419,6 +419,7 @@ func (s *Server) engineStatus() []map[string]any {
 			entry["device"] = he.Device()
 			entry["loading"] = he.Loading()
 			entry["progress"] = he.Progress()
+			entry["kernel"] = he.Kernel()
 		}
 		out = append(out, entry)
 	}

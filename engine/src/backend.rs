@@ -44,6 +44,15 @@ impl Kv {
 }
 
 impl Net {
+    /// Resident weight bytes, for /health: the quickest confirmation that the engine loaded
+    /// the quantization you asked for rather than silently falling back.
+    pub fn weight_bytes(&self) -> usize {
+        match self {
+            Net::Cpu(m) => m.weight_bytes(),
+            Net::Gpu(_) => 0,
+        }
+    }
+
     pub fn config(&self) -> &Config {
         match self {
             Net::Cpu(m) => &m.config,

@@ -33,6 +33,7 @@ type HTTPEngine struct {
 	lastFinish string
 	loading    bool
 	progress   float64
+	kernel     Kernel
 }
 
 func (h *HTTPEngine) Progress() float64 { return h.progress }
@@ -55,6 +56,23 @@ func (h *HTTPEngine) Device() string {
 	return h.device
 }
 
+// Kernel is what the engine reports about the path it is actually executing. Every
+// performance question in this project has eventually been "is the fast path even on", and
+// answering it meant running a benchmark beside the server and inferring. Now it is on the
+// dashboard next to the model it applies to.
+type Kernel struct {
+	SimdLevel  int     `json:"simd_level"`
+	Int8Decode bool    `json:"int8_decode"`
+	Threads    int     `json:"threads"`
+	Quant      string  `json:"quant"`
+	WeightGB   float64 `json:"weight_gb"`
+	KVInt8     bool    `json:"kv_int8"`
+	MTPK       int     `json:"mtp_k"`
+	Context    int     `json:"context"`
+}
+
+func (h *HTTPEngine) Kernel() Kernel { return h.kernel }
+
 func (h *HTTPEngine) Healthy() bool {
 	c := &http.Client{Timeout: 2 * time.Second}
 	resp, err := c.Get(h.url + "/health")
@@ -67,6 +85,7 @@ func (h *HTTPEngine) Healthy() bool {
 		Device   string  `json:"device"`
 		Status   string  `json:"status"`
 		Progress float64 `json:"progress"`
+		Kernel
 	}
 	if json.NewDecoder(resp.Body).Decode(&hs) == nil {
 		if h.model == "" {
@@ -77,6 +96,9 @@ func (h *HTTPEngine) Healthy() bool {
 		}
 		h.progress = hs.Progress
 		h.loading = hs.Status == "loading"
+		if hs.Status == "ok" {
+			h.kernel = hs.Kernel
+		}
 	}
 	// A loading engine is not healthy for routing, but it is alive and progressing.
 	return resp.StatusCode < 500 && !h.loading
