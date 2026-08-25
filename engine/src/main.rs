@@ -43,6 +43,11 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--bench-model") {
+        let dir = args.get(i + 1).map(|s| s.as_str()).unwrap_or(".");
+        bench_model(dir);
+        return;
+    }
 
     let dir = std::env::var("MODEL").expect("set MODEL=<checkpoint dir with config.json, model.safetensors, tokenizer.json>");
     let name = std::env::var("MODEL_NAME").unwrap_or_else(|_| std::path::Path::new(&dir).file_name().unwrap().to_string_lossy().into_owned());
@@ -348,6 +353,64 @@ fn bench_stream() {
         );
     }
     eprintln!("  (near 100% of ceiling = memory-bound, only more channels help; well under = the kernel has headroom)");
+}
+
+/// Benchmark a real model's decode speed: load the actual checkpoint, run inference,
+/// and print params/active-params, GB/token, and measured tok/s with the kernel config.
+/// This is the only way to know "will this checkpoint hit 50 tok/s" before committing to it.
+fn bench_model(dir: &str) {
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let model = model::Model::load(dir);
+    let _load_s = t0.elapsed().as_secs_f32();
+    let cfg = &model.config;
+    let params = cfg.vocab * cfg.hidden + cfg.layers * (cfg.heads * cfg.head_dim * cfg.head_dim + cfg.hidden * cfg.intermediate);
+    let active = if cfg.num_experts > 0 {
+        // MoE: only stream the active experts' parameters per token
+        cfg.layers * (cfg.heads * cfg.head_dim * cfg.head_dim + cfg.experts_per_tok * (3 * cfg.moe_intermediate * cfg.hidden))
+    } else {
+        // Dense: all parameters touched per token
+        params
+    };
+    let quant = std::env::var("QUANT").unwrap_or_else(|_| "bf16".into());
+    let bytes_per_param = match quant.as_str() {
+        "q4" => 0.5,
+        "q8" => 1.0,
+        _ => 2.0, // bf16
+    };
+    let gb_per_token = active as f64 * bytes_per_param / 1e9;
+
+    let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
+    let prompt = "The future of artificial intelligence";
+    let ids = tokenizer.encode(prompt);
+
+    let mut cache = model::KvCache::new(cfg);
+    let t = Instant::now();
+    let mut logits = model.forward_batch(&ids, &mut cache);
+    let prefill_s = t.elapsed().as_secs_f32();
+
+    // Time N decode steps
+    let mut sampler = model::Sampler::new(0.7, 1.0, 1);
+    let n_decode = 100usize;
+    let t = Instant::now();
+    for _ in 0..n_decode {
+        let next = sampler.sample(&mut logits);
+        if next == tokenizer.im_end || next == tokenizer.eos {
+            break;
+        }
+        logits = model.forward_multi(&[(next, 0)], &mut [&mut cache]).pop().unwrap();
+    }
+    let decode_s = t.elapsed().as_secs_f32();
+    let tok_per_s = n_decode as f32 / decode_s;
+
+    let (simd, i8) = kernels::kernel_report();
+    eprintln!(
+        "bench-model: {}\n  {:.2}B params · {:.2}B active/token · {:.2} GB/token\n  prefill {:.1}s, decode {} tok in {:.2}s ({:.1} tok/s)\n  build {} · {} threads · simd {} · {} decode",
+        dir,
+        params as f64 / 1e9, active as f64 / 1e9, gb_per_token,
+        prefill_s, n_decode, decode_s, tok_per_s,
+        COMMIT, pool::global().threads(), simd, if i8 { "int8" } else { "float" }
+    );
 }
 
 fn bench() {
