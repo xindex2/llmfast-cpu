@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmfa.st — fast, cheap inference for open models</title>
+<meta name="description" content="We run open models on hardware we own — engine written from scratch. One OpenAI-compatible API, tokens streamed the moment they exist.">
+<meta property="og:title" content="llmfa.st">
+<meta property="og:description" content="Fast, cheap inference for open models.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M18 3 8 18h6l-2 11 10-15h-6z' fill='%232f5aa8'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="site">
+    <a class="logo" href="/">
+      <!-- Bolt drawn as two overlapping strokes so the outline looks inked by hand. -->
+      <svg width="22" height="26" viewBox="0 0 22 26" aria-hidden="true">
+        <path d="M13.4 1.5 C10 6.6 6.4 11.4 3.2 16.3 C5.6 16.5 8 16.2 10.3 16.5
+                 C9.4 19.4 8.6 22.3 8.2 24.4 C11.7 19.4 15.3 14.4 18.6 9.5
+                 C16.2 9.4 13.8 9.6 11.6 9.3 C12.3 6.7 13 4 13.4 1.5 Z"
+              fill="#ffd96b" stroke="#1c1b19" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      llmfa.st
+    </a>
+    <nav>
+      <a href="#idea">How it works</a>
+      <a href="#models">Models</a>
+      <a href="#start">Get started</a>
+      <a href="/app">Log in</a>
+      <a class="btn nav-btn" href="/app#/signup">Sign up</a>
+    </nav>
+  </header>
+
+  <!-- ================= hero ================= -->
+  <section class="hero">
+    <div class="hero-copy">
+      <h1>
+        Fast, cheap inference<br>
+        for <span class="underlined">open models<svg viewBox="0 0 220 12" preserveAspectRatio="none" aria-hidden="true"><path d="M2 8 C 45 3, 92 10, 138 5 C 168 2, 196 7, 218 4" class="sketch-stroke pen" stroke-width="2.6"/><path d="M6 11 C 50 7, 96 12, 140 8.5" class="sketch-stroke pen thin" stroke-width="1.8"/></svg></span>.
+      </h1>
+      <p class="lede">
+        We run open models on hardware we own — inference engine written from
+        scratch — and hand you back tokens the moment they exist.
+        One OpenAI-compatible API. No queue.
+      </p>
+      <div class="cta">
+        <a class="btn" href="/app#/signup">Create an account</a>
+        <a class="btn ghost" href="#start">See how it works</a>
+      </div>
+    </div>
+
+    <!-- The promise, drawn: a prompt goes in, tokens leave immediately and keep
+         coming. Nothing accumulates anywhere. -->
+    <div class="hero-art">
+      <svg viewBox="0 0 420 330" role="img"
+           aria-label="A prompt enters a GPU and tokens stream out one after another without waiting.">
+
+        <!-- prompt, arriving -->
+        <path d="M14 44 C 44 41, 78 47, 106 43 C 109 58, 105 74, 108 88
+                 C 78 92, 44 86, 16 90 C 12 75, 17 59, 14 44 Z"
+              fill="#fff" opacity=".6"/>
+        <path d="M14 44 C 44 41, 78 47, 106 43 C 109 58, 105 74, 108 88
+                 C 78 92, 44 86, 16 90 C 12 75, 17 59, 14 44 Z"
+              class="sketch-stroke"/>
+        <text x="61" y="71" class="dg-sub" text-anchor="middle">your prompt</text>
+
+        <path d="M114 67 C 136 64, 158 71, 178 67" class="sketch-stroke pen"/>
+        <path d="M168 60 L 180 67 L 168 74" class="sketch-stroke pen"/>
+
+        <!-- the chip: drawn twice, slightly offset, so the outline looks inked -->
+        <path d="M188 40 C 232 36, 284 44, 328 38 C 332 76, 326 122, 330 158
+                 C 284 163, 232 155, 190 160 C 186 122, 192 76, 188 40 Z"
+              fill="#fff8e2" opacity=".95"/>
+        <path d="M188 40 C 232 36, 284 44, 328 38 C 332 76, 326 122, 330 158
+                 C 284 163, 232 155, 190 160 C 186 122, 192 76, 188 40 Z"
+              class="sketch-stroke" stroke-width="2.6"/>
+        <path d="M193 45 C 236 41, 286 49, 326 43 C 329 78, 324 118, 327 153"
+              class="sketch-stroke thin"/>
+        <!-- inner die -->
+        <path d="M214 66 C 246 63, 276 69, 304 65 C 307 86, 303 112, 306 132
+                 C 276 136, 246 130, 216 134 C 212 112, 217 86, 214 66 Z"
+              class="sketch-stroke thin" stroke-width="1.8"/>
+        <text x="259" y="106" class="dg-title" text-anchor="middle">GPU</text>
+        <!-- pins -->
+        <path d="M188 60 L 174 59 M188 82 L 174 81 M188 104 L 174 103 M188 126 L 174 125"
+              class="sketch-stroke thin"/>
+        <path d="M330 58 L 344 57 M330 80 L 344 79 M330 102 L 344 101 M330 124 L 344 123"
+              class="sketch-stroke thin"/>
+
+        <!-- speed lines: it is already working -->
+        <path d="M150 24 C 168 21, 186 26, 202 22" class="sketch-stroke pen thin"/>
+        <path d="M164 14 C 180 11, 196 16, 210 12" class="sketch-stroke pen thin"/>
+
+        <!-- tokens leaving, one after another, fading as they go -->
+        <g class="tokens">
+          <rect x="348" y="70" width="26" height="13" rx="6" class="tok" style="--i:0"/>
+          <rect x="348" y="92" width="34" height="13" rx="6" class="tok" style="--i:1"/>
+          <rect x="348" y="114" width="22" height="13" rx="6" class="tok" style="--i:2"/>
+          <rect x="348" y="136" width="30" height="13" rx="6" class="tok" style="--i:3"/>
+        </g>
+        <text x="366" y="176" class="dg-sub" text-anchor="middle">tokens</text>
+
+        <!-- stopwatch, annotating the thing that actually matters -->
+        <circle cx="96" cy="238" r="34" fill="#fff" opacity=".6"/>
+        <path d="M96 204 C 115 205, 130 220, 130 238 C 130 257, 114 271, 96 272
+                 C 77 271, 62 256, 62 238 C 62 219, 78 204, 96 204 Z"
+              class="sketch-stroke"/>
+        <path d="M99 207 C 116 209, 128 222, 128 238" class="sketch-stroke thin"/>
+        <path d="M88 200 L 104 200" class="sketch-stroke"/>
+        <path d="M96 238 L 96 219" class="sketch-stroke pen" stroke-width="2.4"/>
+        <path d="M96 238 L 110 245" class="sketch-stroke pen" stroke-width="2.4"/>
+
+        <path d="M134 234 C 156 228, 180 232, 200 226" class="sketch-stroke pen thin"/>
+        <text x="206" y="224" class="dg-hand">first token, straight away</text>
+        <text x="206" y="248" class="dg-hand" style="font-size:16px; fill:var(--muted)">
+          nothing waits in a queue
+        </text>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ================= the idea ================= -->
+  <section id="idea">
+    <h2>The whole idea, on one napkin</h2>
+    <p class="muted" style="max-width:52ch">
+      You already know how to call an OpenAI-compatible endpoint. Point it at us
+      instead and the same code runs against open weights, on hardware we own.
+    </p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 900 330" role="img"
+           aria-label="Your app sends a request to llmfa.st, which routes it to a GPU running an open model; tokens stream back as they are generated.">
+
+        <!-- ---- box 1: your app ---- -->
+        <path d="M8 96 C 60 92, 118 100, 168 95 C 172 120, 166 148, 170 172
+                 C 118 177, 58 169, 10 174 C 6 149, 12 121, 8 96 Z"
+              class="sketch-fill"/>
+        <path d="M8 96 C 60 92, 118 100, 168 95 C 172 120, 166 148, 170 172
+                 C 118 177, 58 169, 10 174 C 6 149, 12 121, 8 96 Z"
+              class="sketch-stroke"/>
+        <!-- second pass, offset a hair: the pen going round twice -->
+        <path d="M11 99 C 62 95, 120 103, 166 98 C 169 122, 164 146, 167 169"
+              class="sketch-stroke thin"/>
+        <text x="89" y="129" class="dg-title" text-anchor="middle">your app</text>
+        <text x="89" y="149" class="dg-sub" text-anchor="middle">any OpenAI SDK</text>
+
+        <!-- ---- arrow 1 ---- -->
+        <path d="M176 134 C 220 130, 262 138, 302 133" class="sketch-stroke pen"/>
+        <path d="M292 126 L 304 133 L 292 141" class="sketch-stroke pen"/>
+        <text x="240" y="112" class="dg-sub" text-anchor="middle">/chat/completions</text>
+
+        <!-- ---- box 2: llmfa.st (the star, drawn bigger) ---- -->
+        <path d="M312 72 C 380 67, 452 76, 522 70 C 527 108, 520 158, 525 196
+                 C 452 202, 380 193, 314 199 C 309 160, 317 110, 312 72 Z"
+              fill="#fff8e2" opacity=".9"/>
+        <path d="M312 72 C 380 67, 452 76, 522 70 C 527 108, 520 158, 525 196
+                 C 452 202, 380 193, 314 199 C 309 160, 317 110, 312 72 Z"
+              class="sketch-stroke" stroke-width="2.6"/>
+        <path d="M316 76 C 384 71, 454 80, 520 74 C 524 110, 518 156, 522 192"
+              class="sketch-stroke thin"/>
+        <text x="418" y="106" class="dg-title" text-anchor="middle" style="font-size:17px">llmfa.st</text>
+        <text x="418" y="132" class="dg-sub" text-anchor="middle">checks your key</text>
+        <text x="418" y="152" class="dg-sub" text-anchor="middle">picks the least busy GPU</text>
+        <text x="418" y="172" class="dg-sub" text-anchor="middle">streams straight through</text>
+
+        <!-- ---- arrow 2 ---- -->
+        <path d="M531 134 C 572 130, 610 138, 650 133" class="sketch-stroke pen"/>
+        <path d="M640 126 L 652 133 L 640 141" class="sketch-stroke pen"/>
+
+        <!-- ---- box 3: our GPUs ---- -->
+        <path d="M660 62 C 730 57, 812 66, 884 60 C 889 104, 882 162, 887 206
+                 C 812 212, 730 203, 662 209 C 657 164, 665 106, 660 62 Z"
+              class="sketch-fill"/>
+        <path d="M660 62 C 730 57, 812 66, 884 60 C 889 104, 882 162, 887 206
+                 C 812 212, 730 203, 662 209 C 657 164, 665 106, 660 62 Z"
+              class="sketch-stroke"/>
+        <path d="M664 66 C 734 61, 814 70, 882 64 C 886 106, 880 160, 884 202"
+              class="sketch-stroke thin"/>
+        <text x="774" y="94" class="dg-title" text-anchor="middle">our servers</text>
+        <text x="774" y="122" class="dg-sub" text-anchor="middle">Qwen · DeepSeek</text>
+        <text x="774" y="142" class="dg-sub" text-anchor="middle">GLM · Kimi</text>
+        <text x="774" y="170" class="dg-sub" text-anchor="middle">weights already resident</text>
+
+        <!-- ---- return arrow: tokens streaming back ---- -->
+        <path d="M770 218 C 762 258, 700 272, 600 274 C 420 278, 240 272, 120 268
+                 C 100 267, 90 254, 89 186"
+              class="sketch-stroke pen" stroke-dasharray="7 6"/>
+        <path d="M82 196 L 89 182 L 96 196" class="sketch-stroke pen"/>
+        <text x="430" y="300" class="dg-hand" text-anchor="middle">…tokens stream back one at a time, as they're generated</text>
+
+        <!-- ---- margin annotation on the middle box ---- -->
+        <path d="M418 62 C 412 46, 402 36, 388 30" class="sketch-stroke pen thin"/>
+        <text x="384" y="24" class="dg-hand" text-anchor="end">no queue — if we're full we say so instantly</text>
+      </svg>
+    </div>
+  </section>
+
+  <hr class="hr">
+
+  <!-- ================= why fast ================= -->
+  <section>
+    <h2>Why it's quick</h2>
+    <div class="grid3">
+      <div class="card">
+        <div class="num">1</div>
+        <h3>Your system prompt is computed once</h3>
+        <p>
+          Prefix caching keeps the shared start of your conversations resident on
+          the GPU. Repeat calls skip straight past it — and we bill those cached
+          tokens at a fraction of the normal rate.
+        </p>
+      </div>
+      <div class="card">
+        <div class="num">2</div>
+        <h3>We never make you wait in line</h3>
+        <p>
+          When a GPU is full we return a <code>429</code> immediately instead of
+          holding your request. Queueing looks like speed on our dashboard and
+          feels like slowness in your app. We'd rather refuse than pretend.
+        </p>
+      </div>
+      <div class="card">
+        <div class="num">3</div>
+        <h3>Nothing buffers on the way out</h3>
+        <p>
+          Every token is flushed to your socket the moment it exists — no
+          batching, no compression, no proxy sitting on the stream. First token
+          out is first token seen.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="hr">
+
+  <!-- ================= models ================= -->
+  <section id="models">
+    <h2>Models</h2>
+    <p class="muted" style="max-width:54ch">
+      Open weights, run on our own metal. Every model keeps the licence its
+      authors published it under.
+    </p>
+
+    <div class="modelgrid">
+      <!-- The icons are each lab's own, served from this origin rather than
+           hotlinked: a request to four third parties on every page load would
+           leak visitor IPs and break the page whenever one of them moved a
+           file. Using a maker's mark to identify the model of theirs we serve
+           is descriptive; it does not imply they endorse us. -->
+      <a class="modelcard" href="https://api.llmfa.st/v1/models">
+        <img class="mark" src="/img/qwen.png" alt="Qwen" width="40" height="40" loading="lazy">
+        <span class="body">
+          <strong>Qwen3</strong>
+          <em>Alibaba</em>
+          <span class="tags"><i>text</i><i>vision</i><i>tools</i></span>
+        </span>
+      </a>
+
+      <a class="modelcard" href="https://api.llmfa.st/v1/models">
+        <img class="mark" src="/img/deepseek.png" alt="DeepSeek" width="40" height="40" loading="lazy">
+        <span class="body">
+          <strong>DeepSeek</strong>
+          <em>DeepSeek AI</em>
+          <span class="tags"><i>text</i><i>reasoning</i><i>tools</i></span>
+        </span>
+      </a>
+
+      <a class="modelcard" href="https://api.llmfa.st/v1/models">
+        <img class="mark" src="/img/glm.svg" alt="GLM" width="40" height="40" loading="lazy">
+        <span class="body">
+          <strong>GLM</strong>
+          <em>Z.ai</em>
+          <span class="tags"><i>text</i><i>reasoning</i><i>tools</i></span>
+        </span>
+      </a>
+
+      <a class="modelcard" href="https://api.llmfa.st/v1/models">
+        <img class="mark" src="/img/kimi.png" alt="Kimi" width="40" height="40" loading="lazy">
+        <span class="body">
+          <strong>Kimi</strong>
+          <em>Moonshot AI</em>
+          <span class="tags"><i>text</i><i>long context</i><i>tools</i></span>
+        </span>
+      </a>
+    </div>
+
+    <p class="small muted" style="margin-top:20px">
+      The exact models we serve, their context windows, capabilities and current
+      pricing are always at
+      <a href="https://api.llmfa.st/v1/models"><code>api.llmfa.st/v1/models</code></a>.
+      That endpoint is the source of truth; nothing on this page is.
+      You can also compare us against every other provider on
+      <a href="https://openrouter.ai">OpenRouter</a>.
+    </p>
+  </section>
+
+  <hr class="hr">
+
+  <!-- ================= get started ================= -->
+  <section id="start">
+    <h2>Get started</h2>
+    <p class="muted" style="max-width:52ch">
+      Change two lines. If your code already talks to an OpenAI-compatible API,
+      it already talks to us.
+    </p>
+
+    <pre><span class="c"># Python — the OpenAI SDK, pointed at us</span>
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=<span class="s">"https://api.llmfa.st/v1"</span>,
+    api_key=<span class="s">"sk-llmfast-..."</span>,
+)
+
+stream = client.chat.completions.create(
+    model=<span class="s">"qwen/qwen3-32b"</span>,
+    messages=[{<span class="s">"role"</span>: <span class="s">"user"</span>, <span class="s">"content"</span>: <span class="s">"Hello"</span>}],
+    stream=<span class="s">True</span>,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or <span class="s">""</span>, end=<span class="s">""</span>)</pre>
+
+    <p style="margin-top:24px">
+      Or reach us through <a href="https://openrouter.ai">OpenRouter</a>, where
+      we sit alongside every other provider and you can compare us on price and
+      speed before sending a single request.
+    </p>
+
+    <div class="cta">
+      <a class="btn" href="/app#/signup">Create an account &amp; get an API key</a>
+    </div>
+    <p class="note" style="margin-top:22px">
+      Questions? Just email us — a person reads it.
+    </p>
+  </section>
+
+  <footer class="site">
+    <span>© <span id="yr">2026</span> llmfa.st</span>
+    <nav>
+      <a href="/terms.html">Terms of Use</a>
+      <a href="/privacy.html">Privacy Policy</a>
+      <a href="https://api.llmfa.st/v1/models">Models API</a>
+      <a href="mailto:hello@llmfa.st">Contact</a>
+    </nav>
+  </footer>
+
+</div>
+
+<script>document.getElementById('yr').textContent = new Date().getFullYear();</script>
+</body>
+</html>

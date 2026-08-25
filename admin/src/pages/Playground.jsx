@@ -55,7 +55,7 @@ export default function Playground({ session = false }) {
   }
 
   return (
-    <>
+    <div className="play">
       <h2>Playground</h2>
       <div className="row">
         <label>model<select value={model} onChange={(e) => setModel(e.target.value)}>{models.map((m) => <option key={m.id}>{m.id}</option>)}</select></label>
@@ -87,12 +87,12 @@ export default function Playground({ session = false }) {
         </>}
       </p>}
 
-      <div className="row">
-        <textarea rows={3} value={input} placeholder="Message… (Enter to send, Shift+Enter for newline)" onChange={(e) => setInput(e.target.value)}
+      <div className="row composer">
+        <textarea rows={2} value={input} placeholder="Message… (Enter to send, Shift+Enter for newline)" onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} style={{ flex: 1 }} />
         {busy ? <button className="danger" onClick={() => abort.current?.abort()}><Stop /> Stop</button>
               : <button className="primary" onClick={send} disabled={!model}><Send /> Send</button>}
       </div>
-    </>
+    </div>
   )
 }

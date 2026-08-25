@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms of Use — llmfa.st</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M18 3 8 18h6l-2 11 10-15h-6z' fill='%232f5aa8'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap narrow legal">
+
+  <header class="site">
+    <a class="logo" href="/">
+      <svg width="22" height="26" viewBox="0 0 22 26" aria-hidden="true">
+        <path d="M13.4 1.5 C10 6.6 6.4 11.4 3.2 16.3 C5.6 16.5 8 16.2 10.3 16.5
+                 C9.4 19.4 8.6 22.3 8.2 24.4 C11.7 19.4 15.3 14.4 18.6 9.5
+                 C16.2 9.4 13.8 9.6 11.6 9.3 C12.3 6.7 13 4 13.4 1.5 Z"
+              fill="#ffd96b" stroke="#1c1b19" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      llmfa.st
+    </a>
+    <nav><a href="/">Home</a><a href="/privacy.html">Privacy</a></nav>
+  </header>
+
+  <h1>Terms of Use</h1>
+  <p class="updated">Last updated: 21 August 2026</p>
+
+  <nav class="toc" aria-label="Contents">
+    <a href="#agreement">1. This agreement</a>
+    <a href="#services">2. The Services</a>
+    <a href="#models">3. Third-party models</a>
+    <a href="#accounts">4. Accounts and API keys</a>
+    <a href="#fees">5. Fees and payment</a>
+    <a href="#delinquency">6. Late payment</a>
+    <a href="#refunds">7. Refunds</a>
+    <a href="#cancellation">8. Cancellation</a>
+    <a href="#content">9. Your content and outputs</a>
+    <a href="#accuracy">10. Output accuracy</a>
+    <a href="#restrictions">11. Content restrictions</a>
+    <a href="#conduct">12. Prohibited activities</a>
+    <a href="#capacity">13. Rate limits and capacity</a>
+    <a href="#security">14. Security</a>
+    <a href="#feedback">15. Feedback</a>
+    <a href="#ip">16. Intellectual property</a>
+    <a href="#thirdparty">17. Third-party platforms</a>
+    <a href="#privacy">18. Privacy</a>
+    <a href="#term">19. Term and termination</a>
+    <a href="#changes">20. Changes</a>
+    <a href="#disclaimers">21. Disclaimers</a>
+    <a href="#liability">22. Limitation of liability</a>
+    <a href="#indemnity">23. Indemnification</a>
+    <a href="#trade">24. Trade controls</a>
+    <a href="#law">25. Governing law</a>
+    <a href="#notices">26. Notices</a>
+    <a href="#misc">27. Miscellaneous</a>
+    <a href="#contact">28. Contact</a>
+  </nav>
+
+  <h2 id="agreement">1. This agreement</h2>
+  <p>
+    These Terms of Use (the "Terms") are a binding agreement between you —
+    whether personally or on behalf of an organisation ("you", "your",
+    "Customer") — and llmfa.st ("llmfa.st", "we", "us", "our").
+  </p>
+  <p>
+    They govern your access to and use of our inference API at
+    <code>api.llmfa.st</code>, our website at <code>llmfa.st</code>, and any
+    related documentation, tools or interfaces (together, the "Platform"). The
+    Platform provides hosted inference on open-weight language models (the
+    "Services"). Any additional policy we publish and reference here forms part
+    of these Terms.
+  </p>
+  <p>
+    We do not represent that the Platform is appropriate or available in every
+    country. If you access it from somewhere that would make doing so unlawful,
+    or would subject us to registration requirements we have not met, you do so
+    on your own initiative and are responsible for compliance with local law.
+  </p>
+  <p>
+    The Platform is not built to satisfy sector-specific regimes such as HIPAA,
+    PCI-DSS or FedRAMP. Do not send us data governed by those regimes unless we
+    have agreed otherwise in a signed written agreement.
+  </p>
+  <p>You must be at least 18 and not a minor in your place of residence to use the Platform.</p>
+  <p class="caps">
+    By creating an account, using an API key, or otherwise accessing the
+    Services, you agree to these Terms. If you are accepting on behalf of an
+    organisation, you confirm you have authority to bind it. If you do not
+    agree, do not use the Platform.
+  </p>
+
+  <h2 id="services">2. The Services</h2>
+  <p>
+    Subject to these Terms and to your payment of applicable fees, we grant you
+    a non-exclusive, non-transferable right to access and use the Services for
+    the period you have paid for. That includes using our API to build the
+    Services into your own applications, products or services (each a "Customer
+    Application") and making those available to your own end users.
+  </p>
+  <p>
+    You are responsible for your end users' use of the Services through your
+    Customer Application, and must ensure they are bound by terms at least as
+    protective as these.
+  </p>
+
+  <h2 id="models">3. Third-party models</h2>
+  <p>
+    The Services run open-weight models published by third parties — for example
+    the Qwen, DeepSeek, GLM and Kimi families. We do not own these models. Each
+    is released under its own licence, and some carry restrictions on acceptable
+    use, on training other models from their outputs, or on commercial
+    deployment above a certain scale.
+  </p>
+  <p>
+    We identify the upstream source of every model we serve in the
+    <code>hugging_face_id</code> field of our
+    <a href="https://api.llmfa.st/v1/models">models endpoint</a>, so you can
+    review the applicable licence before you use it. <strong>You are responsible
+    for complying with the licence of each model you call</strong>, and for
+    ensuring your end users do the same.
+  </p>
+  <p>
+    The models are provided as-is. We did not train them, we cannot audit their
+    training data, and we make no representation about their behaviour, accuracy
+    or the provenance of their outputs.
+  </p>
+
+  <h2 id="accounts">4. Accounts and API keys</h2>
+  <p>You represent and warrant that:</p>
+  <ul>
+    <li>the registration information you give us is true, accurate and current, and you will keep it so;</li>
+    <li>you will keep your API keys confidential;</li>
+    <li>you are not a minor in your place of residence; and</li>
+    <li>your use of the Services will not breach any applicable law.</li>
+  </ul>
+  <p>
+    You are responsible for all activity carried out with your API keys,
+    including activity you did not authorise but which resulted from your
+    failure to keep them secret. Tell us immediately at
+    security@llmfa.st if a key is exposed and we will
+    revoke it. We store only a cryptographic hash of each key and cannot recover
+    a lost one — we can only issue a replacement.
+  </p>
+  <p>
+    Do not share an account or key with anyone outside your organisation, create
+    multiple accounts to circumvent limits or free allowances, or register using
+    disposable email addresses.
+  </p>
+
+  <h2 id="fees">5. Fees and payment</h2>
+  <p>
+    Pricing for each model is published on the Platform and, authoritatively, at
+    our <a href="https://api.llmfa.st/v1/models">models endpoint</a>. Usage is
+    billed on measured tokens: prompt tokens, completion tokens, and cached
+    prompt tokens each at their published rate. Token counts are measured by the
+    inference engine that served the request, and that measurement is
+    authoritative for billing.
+  </p>
+  <p>
+    You authorise us to charge your chosen payment method for all amounts due.
+    Where you have enabled automatic top-up, you consent to recurring charges
+    when your balance falls below the threshold you set, until you disable it.
+  </p>
+  <p>
+    All amounts are in USD and are exclusive of VAT,
+    sales tax and other duties, which you are responsible for unless you supply
+    a valid exemption certificate. We may correct pricing errors even after a
+    payment has been taken, and may change prices on
+    30 days' notice; reductions take effect
+    immediately.
+  </p>
+  <p>
+    Charges you do not dispute in writing within 60
+    days of the charge date are treated as accepted.
+  </p>
+  <p>
+    Where you reach us through a routing platform such as OpenRouter rather than
+    directly, billing is governed by our agreement with that platform and by
+    your agreement with them, not by this section.
+  </p>
+
+  <h2 id="delinquency">6. Late payment</h2>
+  <p>
+    An account is delinquent if an amount remains unpaid at the start of the next
+    billing cycle. We may suspend Services on accounts delinquent for more than
+    15 days, and may archive or delete data on
+    accounts delinquent for more than 30 days.
+    Overdue amounts accrue interest at 1% per month
+    or the maximum the law allows, whichever is lower, and you are responsible
+    for reasonable costs of collection.
+  </p>
+
+  <h2 id="refunds">7. Refunds</h2>
+  <p>
+    Usage-based charges are for compute already consumed and are non-refundable.
+    Unused prepaid credit is refundable on request within
+    12 months of purchase, less any amounts owed.
+  </p>
+  <p>
+    Nothing here limits any non-waivable statutory right of withdrawal or refund
+    you may have as a consumer under the law of your country of residence.
+  </p>
+
+  <h2 id="cancellation">8. Cancellation</h2>
+  <p>
+    You may stop using the Services at any time and close your account from your
+    account settings or by contacting us. Where you hold a subscription, it
+    continues to the end of the current term and then ends; if you do not cancel
+    before the renewal date it renews for a further term of the same length.
+  </p>
+
+  <h2 id="content">9. Your content and outputs</h2>
+  <p>
+    You and your end users submit prompts and other material to the Services
+    ("Input") and receive generated material back ("Output"). Input and Output
+    together are your "Customer Content".
+  </p>
+  <p>
+    <strong>You keep everything.</strong> As between you and us, you retain all
+    rights you have in your Input, and to the extent we hold any rights in
+    Output generated for you, we assign them to you — subject always to the
+    licence of the underlying model that produced them.
+  </p>
+  <p>
+    You grant us only the narrow, non-exclusive, royalty-free licence needed to
+    receive, process and transmit your Input in order to serve your request and
+    return the Output. That licence ends when the request ends.
+  </p>
+  <p class="caps">
+    We do not train models on your Customer Content. We do not sell it, share it
+    for anyone else's commercial purposes, or use it to improve any model. There
+    is no opt-out to configure, because there is nothing to opt out of.
+  </p>
+  <p>
+    We operate zero data retention for inference content. Prompts and
+    completions are held in memory for the lifetime of a request and are never
+    written to disk, to logs or to any database. What we do keep is request
+    metadata — timestamp, model, token counts, latency and HTTP status — for 30
+    days, for billing and reliability monitoring. Our
+    <a href="/privacy.html">Privacy Policy</a> sets this out in full.
+  </p>
+  <p>
+    You are responsible for your Input and confirm you hold all rights, consents
+    and permissions needed to send it to us and to have it processed.
+  </p>
+
+  <h2 id="accuracy">10. Output accuracy</h2>
+  <p>
+    Language models are probabilistic. Output may be wrong, incomplete, outdated,
+    biased, or offensive, and may confidently state things that are untrue —
+    including about real people, places and events. Output does not represent our
+    views.
+  </p>
+  <p>
+    Because generation is probabilistic, Output is not guaranteed to be unique.
+    Another customer sending a similar prompt may receive similar or identical
+    content, and content generated for someone else is not yours regardless of
+    how similar it is.
+  </p>
+  <p>
+    You must evaluate Output for accuracy and suitability before relying on it,
+    including human review where the stakes justify it. Do not use Output as a
+    sole source of truth or as a substitute for professional advice.
+  </p>
+  <p class="caps">
+    You must not use Output to make, or materially inform, decisions about an
+    individual's credit, employment, education, housing, insurance, immigration
+    status, legal position or medical care, and you must not use the Services in
+    safety-critical systems where a failure could cause injury or death.
+  </p>
+
+  <h2 id="restrictions">11. Content restrictions</h2>
+  <p>You must not use the Services to generate, transmit or store material that:</p>
+  <ul>
+    <li>sexualises minors in any way, or constitutes child sexual abuse material;</li>
+    <li>incites, threatens or facilitates violence, terrorism or genocide;</li>
+    <li>harasses, defames, intimidates or abuses any person;</li>
+    <li>assists in developing chemical, biological, radiological, nuclear or cyber weapons;</li>
+    <li>infringes anyone's copyright, patent, trademark, trade secret, privacy or publicity rights;</li>
+    <li>uses the name, voice or likeness of an identifiable person without their consent;</li>
+    <li>is designed to deceive at scale — disinformation campaigns, impersonation, fraud, phishing or spam;</li>
+    <li>discriminates against people on the basis of race, national origin, religion, gender, sexual orientation, disability or another protected characteristic; or</li>
+    <li>breaches the licence of the model that generated it.</li>
+  </ul>
+  <p>
+    You must not represent Output as human-authored where doing so would mislead
+    someone to their detriment or breach a disclosure obligation that applies to
+    you.
+  </p>
+  <p>
+    We may take steps we reasonably believe necessary to verify compliance with
+    these Terms. We may preserve and disclose account information and, where we
+    hold it, Customer Content, where we believe in good faith that doing so is
+    reasonably necessary to comply with legal process, enforce these Terms,
+    investigate fraud or a security incident, or protect the safety of any person.
+  </p>
+
+  <h2 id="conduct">12. Prohibited activities</h2>
+  <p>You must not:</p>
+  <ul>
+    <li>reverse engineer, decompile or attempt to extract the weights, architecture or configuration of any model we serve;</li>
+    <li>use Output to train, fine-tune or distil a competing model, where the underlying model's licence prohibits it;</li>
+    <li>resell raw API access, or operate the Services as a service bureau, without a written reseller agreement with us;</li>
+    <li>circumvent rate limits, quotas, billing or access controls, including by spreading one key across parties or creating multiple accounts;</li>
+    <li>probe, scan or test the vulnerability of the Platform, or breach any security or authentication measure, without our prior written consent;</li>
+    <li>interfere with the Platform or place an unreasonable load on it;</li>
+    <li>use automated systems to scrape the Platform beyond documented API use;</li>
+    <li>impersonate another person, or misrepresent your affiliation with any person or organisation;</li>
+    <li>harass or threaten our staff; or</li>
+    <li>remove any proprietary notice from anything we provide.</li>
+  </ul>
+  <p>
+    We may suspend access immediately, without notice, where continued use risks
+    harm to a person, to us, or to the stability of the Services. Where
+    circumstances allow, we will give notice and an opportunity to fix the
+    problem first.
+  </p>
+
+  <h2 id="capacity">13. Rate limits and capacity</h2>
+  <p>
+    We apply per-key and per-model limits, published in the capacity fields of
+    our <a href="https://api.llmfa.st/v1/models">models endpoint</a>. When we are
+    at capacity we return HTTP <code>429</code> with a <code>Retry-After</code>
+    header immediately rather than holding your request in a queue.
+  </p>
+  <p>
+    We target 99.5% monthly availability but do not
+    guarantee uninterrupted service under these Terms. Any binding availability
+    commitment, and any service credits attached to it, must be set out in a
+    separately signed service level agreement.
+  </p>
+  <p>
+    We may add, change, retire or replace models. Where we retire a model we will
+    publish a <code>deprecation_date</code> in our models endpoint at least
+    30 days beforehand, except where a licence change,
+    security issue or upstream withdrawal requires us to act faster.
+  </p>
+
+  <h2 id="security">14. Security</h2>
+  <p>
+    We maintain an information security programme with technical and
+    organisational measures appropriate to the risk, including encryption in
+    transit, hashed storage of credentials, network isolation of inference
+    hardware, least-privilege access control and logging of administrative
+    action. No system is perfectly secure, and we do not warrant that the
+    Platform will be free from compromise.
+  </p>
+
+  <h2 id="feedback">15. Feedback</h2>
+  <p>
+    If you send us suggestions, ideas or other feedback about the Services, we
+    may use it for any purpose without obligation or compensation to you. Do not
+    send us feedback you consider confidential or proprietary.
+  </p>
+
+  <h2 id="ip">16. Intellectual property</h2>
+  <p>
+    Customer Content is yours, as set out in section 9. Everything else on the
+    Platform — our software, APIs, documentation, designs, text, graphics, and
+    the llmfa.st name and logo — belongs to us or our licensors and is protected
+    by intellectual property law.
+  </p>
+  <p>
+    We grant you a limited, revocable licence to access and use the Platform and
+    our documentation for the purpose of using the Services. You may not copy,
+    modify, distribute, sell, sublicense or create derivative works of our
+    software, or use our name or logo in a way likely to cause confusion, without
+    our prior written permission. All rights not expressly granted are reserved.
+  </p>
+
+  <h2 id="thirdparty">17. Third-party platforms</h2>
+  <p>
+    You may reach the Services through a third-party routing platform such as
+    OpenRouter. Where you do, your relationship with that platform is governed by
+    their terms, and their billing, data handling and support arrangements apply
+    to that relationship. These Terms continue to govern our provision of
+    inference and your use of the models.
+  </p>
+  <p>
+    Links from the Platform to third-party sites, models or documentation are
+    provided for convenience. We do not control or endorse them, and your use of
+    them is at your own risk and subject to their own terms.
+  </p>
+
+  <h2 id="privacy">18. Privacy</h2>
+  <p>
+    Our <a href="/privacy.html">Privacy Policy</a> explains what we collect, why,
+    and how long we keep it. By using the Services you agree to it. If you use the
+    Services to process personal data, you are the controller of that data: you
+    must have a lawful basis, give the required notices, and honour the rights of
+    the people concerned. Where we act as your processor, the terms of a data
+    processing agreement apply — contact us to put one in place.
+  </p>
+
+  <h2 id="term">19. Term and termination</h2>
+  <p>
+    These Terms apply for as long as you use the Services. Either of us may
+    terminate for convenience on 30 days' written
+    notice. We may terminate or suspend immediately for material breach, for
+    non-payment after notice, or where required by law or by a model licensor.
+  </p>
+  <p>
+    On termination your access ends, and any unused prepaid balance is refunded on
+    a pro-rata basis less amounts you owe. Sections 3, 9, 10, 16, 21, 22, 23 and
+    25 survive termination, along with any other provision that by its nature
+    should.
+  </p>
+  <p>
+    If we terminate your account for breach, you may not open another without our
+    written consent.
+  </p>
+
+  <h2 id="changes">20. Changes</h2>
+  <p>
+    We may update these Terms. We will post the updated version with a new date
+    and, for changes that materially affect your rights, give at least
+    30 days' notice by email to active customers
+    before they take effect. Continuing to use the Services after that date means
+    you accept the change. If you do not accept it, stop using the Services and
+    close your account before it takes effect.
+  </p>
+  <p>
+    We may also modify or discontinue the Services, in whole or in part. We will
+    give reasonable notice of a change that materially reduces functionality you
+    are paying for.
+  </p>
+
+  <h2 id="disclaimers">21. Disclaimers</h2>
+  <p class="caps">
+    The Platform and Services are provided "as is" and "as available". To the
+    fullest extent permitted by law we disclaim all warranties, express or
+    implied, including implied warranties of merchantability, fitness for a
+    particular purpose, title and non-infringement. We do not warrant that the
+    Services will be uninterrupted, secure or error-free, that defects will be
+    corrected, or that Output will be accurate, current, complete or fit for any
+    purpose.
+  </p>
+  <p>
+    Nothing in these Terms excludes or limits liability that cannot lawfully be
+    excluded or limited, including liability for death or personal injury caused
+    by negligence, for fraud or fraudulent misrepresentation, or for any
+    non-waivable statutory consumer right.
+  </p>
+
+  <h2 id="liability">22. Limitation of liability</h2>
+  <p class="caps">
+    Subject to section 21, neither party is liable for indirect, incidental,
+    special, consequential or punitive damages, or for lost profits, lost revenue,
+    lost data or loss of goodwill, however caused and on any theory of liability,
+    even if advised of the possibility.
+  </p>
+  <p class="caps">
+    Our total aggregate liability arising out of or relating to these Terms is
+    limited to the greater of the fees you paid us in the
+    3 months immediately before the event giving rise
+    to the claim, and USD 100.
+  </p>
+  <p>
+    Some jurisdictions do not allow these exclusions or limitations, in which case
+    the ones that are not permitted do not apply to you and you may have
+    additional rights.
+  </p>
+
+  <h2 id="indemnity">23. Indemnification</h2>
+  <p>
+    You will defend, indemnify and hold harmless llmfa.st, its affiliates, and
+    their officers, employees and agents against any third-party claim, and any
+    resulting loss, damage, liability, cost and reasonable legal fees, arising out
+    of your Customer Content, your use of the Services, your breach of these
+    Terms, or your breach of any law or third-party right. We will notify you
+    promptly of any such claim and give you reasonable cooperation in defending it.
+  </p>
+
+  <h2 id="trade">24. Trade controls</h2>
+  <p>
+    You must comply with all applicable export control and sanctions laws. You may
+    not use the Services, or allow them to be used, in or for the benefit of any
+    embargoed country or territory, or by any person or entity subject to trade
+    restrictions. You confirm that you are not such a person and are not acting on
+    behalf of one.
+  </p>
+
+  <h2 id="law">25. Governing law and disputes</h2>
+  <p>
+    Before either of us starts proceedings, we will each try in good faith to
+    resolve the dispute directly. Write to <a href="mailto:legal@llmfa.st">legal@llmfa.st</a>
+    setting out the problem and what you would like done about it, and we will
+    respond within 30 days.
+  </p>
+  <p>
+    These Terms, and any dispute arising out of or in connection with them or the
+    Services, are governed by the law of the jurisdiction in which llmfa.st is
+    established, and its courts have jurisdiction — except that either party may
+    seek injunctive relief in any court of competent jurisdiction to protect its
+    intellectual property or confidential information.
+  </p>
+  <p>
+    Nothing in this section deprives you of the protection of any mandatory
+    consumer law, or of the right to bring proceedings in the courts of your own
+    country, where the law where you live gives you that right. The United
+    Nations Convention on Contracts for the International Sale of Goods does not
+    apply. No claim relating to the Services may be brought more than 2 years
+    after the cause of action arose.
+  </p>
+
+  <h2 id="notices">26. Notices</h2>
+  <p>
+    Notices to us must be sent by email to
+    legal@llmfa.st. Notices to you will be sent to the
+    email address on your account and are treated as received 24 hours after
+    sending, unless we are told delivery failed. Keep your contact details current.
+  </p>
+
+  <h2 id="misc">27. Miscellaneous</h2>
+  <p>
+    These Terms, together with the Privacy Policy and any signed order form or
+    service level agreement, are the entire agreement between us about the
+    Services. Our failure to enforce a provision is not a waiver of it. If a
+    provision is held unenforceable, it is severed and the rest continues in force.
+    You may not assign these Terms without our written consent; we may assign them
+    in connection with a merger or a sale of substantially all our assets. Neither
+    party is liable for delay or failure caused by events beyond its reasonable
+    control. Headings are for convenience only.
+  </p>
+
+  <h2 id="contact">28. Contact</h2>
+  <p>
+    llmfa.st<br>
+    General enquiries: <a href="mailto:hello@llmfa.st">hello@llmfa.st</a><br>
+    Legal notices: <a href="mailto:legal@llmfa.st">legal@llmfa.st</a><br>
+    Security reports: <a href="mailto:security@llmfa.st">security@llmfa.st</a><br>
+    Privacy requests: <a href="mailto:privacy@llmfa.st">privacy@llmfa.st</a>
+  </p>
+
+  <footer class="site">
+    <span>© <span id="yr">2026</span> llmfa.st</span>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/privacy.html">Privacy Policy</a>
+      <a href="mailto:hello@llmfa.st">Contact</a>
+    </nav>
+  </footer>
+
+</div>
+<script>document.getElementById('yr').textContent = new Date().getFullYear();</script>
+</body>
+</html>

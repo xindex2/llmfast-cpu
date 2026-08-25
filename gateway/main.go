@@ -745,11 +745,28 @@ func main() {
 		admin, app := page("index.html"), page("app.html")
 		mux.HandleFunc("GET /admin/ui", admin)
 		mux.HandleFunc("GET /admin/ui/", admin) // trailing slash and deep links
-		// The customer console owns /. It routes on the hash, so one file covers every page.
-		mux.HandleFunc("GET /{$}", app)
+		// The customer console lives at /app. It routes on the hash, so one file covers every page.
+		mux.HandleFunc("GET /app", app)
+		mux.HandleFunc("GET /app/", app)
 		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+		if site := os.Getenv("SITE_DIR"); site != "" {
+			// The marketing site owns /: static files served straight from SITE_DIR, with the
+			// signup/login buttons pointing at /app.
+			sfs := http.FileServer(http.Dir(site))
+			mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store, must-revalidate")
+				http.ServeFile(w, r, site+"/index.html")
+			})
+			for _, pfx := range []string{"/style.css", "/img/", "/terms.html", "/privacy.html"} {
+				mux.Handle("GET "+pfx, sfs)
+			}
+			log.Printf("site at /, customer console at /app, admin UI at /admin/ui")
+		} else {
+			// No marketing site on disk: the console keeps owning / (dev setups).
+			mux.HandleFunc("GET /{$}", app)
+			log.Printf("customer console at / and /app, admin UI at /admin/ui, from %s", dir)
+		}
 		serveUI = true
-		log.Printf("customer console at /, admin UI at /admin/ui, from %s", dir)
 	}
 
 	if !serveUI {

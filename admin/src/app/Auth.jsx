@@ -5,7 +5,7 @@ import { api } from '../api'
 import { Bolt } from '../icons'
 
 export default function Auth({ onDone }) {
-  const [mode, setMode] = useState('login')
+  const [mode, setMode] = useState(() => location.hash.includes('signup') ? 'signup' : 'login')
   const [email, setEmail] = useState('')
   const [pass, setPass] = useState('')
   const [busy, setBusy] = useState(false)
