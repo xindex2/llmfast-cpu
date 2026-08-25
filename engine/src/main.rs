@@ -151,7 +151,16 @@ fn main() {
     let slot2 = slot.clone();
     let name2 = name.clone();
     std::thread::spawn(move || {
+        // A panic here must reach /health, not vanish with the thread: a dead loader behind a
+        // live HTTP server reads as "loading 93%" forever, which is the worst possible error UX.
+        let body = move || {
         let t0 = std::time::Instant::now();
+        // The GPU shaders take q8 only. Say so before spending minutes loading weights that
+        // can only end in a panic inside GpuModel::from_cpu.
+        let quant = std::env::var("QUANT").unwrap_or_else(|_| "q8".into());
+        if std::env::var("DEVICE").as_deref() == Ok("gpu") && quant != "q8" {
+            panic!("GPU backend needs quant q8 (got {quant}) — set quant to q8, or device to cpu/auto");
+        }
         let model = model::Model::load(&dir);
         let draft = std::env::var("DRAFT_MODEL").ok().map(|d| {
             let q = std::env::var("DRAFT_QUANT").unwrap_or_else(|_| "q8".into());
@@ -177,6 +186,14 @@ fn main() {
             if model::kv_int8() { "int8" } else { "f32" },
         );
         *slot2.write().unwrap() = Some(engine);
+        };
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            let msg = e.downcast_ref::<String>().cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "model load panicked (see engine.log)".into());
+            eprintln!("load failed: {msg}");
+            server::set_load_error(msg);
+        }
     });
     eprintln!("llmfast-engine listening on {addr} — loading {name}");
     server::serve(&addr, slot, name);

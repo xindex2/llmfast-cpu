@@ -30,6 +30,15 @@ impl Engine {
     }
 }
 
+/// Set when the background load fails: the loading thread must never die silently — a stuck
+/// progress bar at 93% with a healthy-looking process cost a debugging session to a panic
+/// nobody could see. /health turns it into status "error" so the gateway and UI show it.
+static LOAD_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_load_error(msg: String) {
+    let _ = LOAD_ERROR.set(msg);
+}
+
 /// Engine slot: the HTTP server binds immediately so /health can report load progress, and the
 /// model is filled in by a background thread. Requests get 503 + Retry-After until it is ready.
 pub type Slot = Arc<std::sync::RwLock<Option<Arc<Engine>>>>;
@@ -64,6 +73,15 @@ fn handle_loading(mut stream: TcpStream, model_name: &str) {
         }
     }
     let permille = crate::model::LOAD_PROGRESS.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(err) = LOAD_ERROR.get() {
+        let body = json!({"status": "error", "model": model_name, "error": err, "progress": permille as f32 / 1000.0});
+        if request_line.starts_with("GET /health") {
+            respond_json(&mut stream, 503, &body);
+        } else {
+            respond_json(&mut stream, 503, &json!({"error": {"message": err, "type": "server_error"}}));
+        }
+        return;
+    }
     let body = json!({"status": "loading", "model": model_name, "progress": permille as f32 / 1000.0});
     if request_line.starts_with("GET /health") {
         respond_json(&mut stream, 200, &body);

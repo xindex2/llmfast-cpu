@@ -297,6 +297,17 @@ func (r *Registry) Start(id string) error {
 		for i := 0; i < 900; i++ { // up to 30 min
 			time.Sleep(2 * time.Second)
 			eng.Healthy() // refreshes progress even before it is servable
+			if msg := eng.LoadErr(); msg != "" {
+				// The load died (bad quant/device combination, OOM, corrupt checkpoint):
+				// stop the walking-dead process and surface the engine's own message.
+				_ = cmd.Process.Kill()
+				r.update(id, func(m *ModelEntry) {
+					if m.Status == "starting" {
+						m.Status, m.Error, m.Pid, m.Port = "error", msg, 0, 0
+					}
+				})
+				return
+			}
 			lp := eng.Progress()
 			r.update(id, func(m *ModelEntry) {
 				if m.Status == "starting" {

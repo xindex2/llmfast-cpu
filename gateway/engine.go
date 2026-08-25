@@ -33,8 +33,12 @@ type HTTPEngine struct {
 	lastFinish string
 	loading    bool
 	progress   float64
+	loadErr    string
 	kernel     Kernel
 }
+
+// LoadErr is the terminal failure the engine reported while loading ("" when none).
+func (h *HTTPEngine) LoadErr() string { return h.loadErr }
 
 func (h *HTTPEngine) Progress() float64 { return h.progress }
 func (h *HTTPEngine) Loading() bool     { return h.loading }
@@ -86,6 +90,7 @@ func (h *HTTPEngine) Healthy() bool {
 		Device   string  `json:"device"`
 		Status   string  `json:"status"`
 		Progress float64 `json:"progress"`
+		Error    string  `json:"error"`
 		Kernel
 	}
 	if json.NewDecoder(resp.Body).Decode(&hs) == nil {
@@ -97,6 +102,11 @@ func (h *HTTPEngine) Healthy() bool {
 		}
 		h.progress = hs.Progress
 		h.loading = hs.Status == "loading"
+		// A failed load is terminal: the process is alive but will never serve. Without this
+		// the "starting" watcher polls a frozen progress bar for 30 minutes.
+		if hs.Status == "error" && hs.Error != "" {
+			h.loadErr = hs.Error
+		}
 		if hs.Status == "ok" {
 			h.kernel = hs.Kernel
 		}
