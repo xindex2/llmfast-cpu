@@ -257,6 +257,15 @@ func (r *Registry) Start(id string) error {
 	if e.Status != "ready" && e.Status != "running" && e.Status != "starting" {
 		return fmt.Errorf("model is %s", e.Status)
 	}
+	// "ready" is a stored status, not a live check: the files can be deleted out from under it
+	// (disk reclaimed by hand, container reset on an ephemeral disk). Starting an engine on a
+	// gutted directory exits 101 with its log unwritable — say what actually happened instead.
+	if _, err := os.Stat(filepath.Join(e.Dir, "config.json")); err != nil {
+		r.update(id, func(m *ModelEntry) {
+			m.Status, m.Error = "error", "model files are missing on disk — remove this entry and download again"
+		})
+		return fmt.Errorf("model files missing at %s — remove and re-download", e.Dir)
+	}
 	r.mu.Lock()
 	if _, running := r.procs[id]; running {
 		r.mu.Unlock()
