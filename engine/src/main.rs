@@ -134,8 +134,20 @@ fn main() {
         eprintln!("device: {}", net.device());
         let engine = Arc::new(server::Engine::new(net, draft, tokenizer, name2, think));
         model::LOAD_PROGRESS.store(1000, std::sync::atomic::Ordering::Relaxed);
-        eprintln!("ready in {:.1}s (context {}, threads {})", t0.elapsed().as_secs_f32(),
-            engine.model.config().max_context, std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+        // available_parallelism() reports 1 once the pool has pinned its threads (see pool.rs),
+        // so this line claimed "threads 1" on a 20-thread box for as long as it has existed.
+        // Ask the pool. And say which decode kernel is live: every slow-decode investigation
+        // so far has ended at "was the fast path even on", answerable only by inference.
+        let (simd, i8) = kernels::kernel_report();
+        eprintln!(
+            "ready in {:.1}s (context {}, threads {}, simd {}, {} decode, {} KV)",
+            t0.elapsed().as_secs_f32(),
+            engine.model.config().max_context,
+            pool::global().threads(),
+            simd,
+            if i8 { "int8" } else { "float" },
+            if model::kv_int8() { "int8" } else { "f32" },
+        );
         *slot2.write().unwrap() = Some(engine);
     });
     eprintln!("llmfast-engine listening on {addr} — loading {name}");
