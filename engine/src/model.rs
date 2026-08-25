@@ -832,6 +832,7 @@ impl Model {
             eprintln!("embed      |x|={norm:10.3} first4=[{:.4}, {:.4}, {:.4}, {:.4}]", x0[0], x0[1], x0[2], x0[3]);
         }
         let mut tm = [0f64; 6]; // qkv, norm+rope+store, attention, o, mlp, head
+        let t_all = std::time::Instant::now();
         let mut tick = std::time::Instant::now();
         let mut lap = |slot: usize, tick: &mut std::time::Instant| {
             if profile {
@@ -1030,8 +1031,16 @@ impl Model {
         self.lm_head.matmul(&xl, lasts.len(), &mut logits);
         lap(5, &mut tick);
         if profile {
-            eprintln!("step m={m}: qkv {:.1}ms | norm/rope/kv {:.1}ms | attn {:.1}ms | o {:.1}ms | mlp {:.1}ms | head {:.1}ms",
-                tm[0] * 1e3, tm[1] * 1e3, tm[2] * 1e3, tm[3] * 1e3, tm[4] * 1e3, tm[5] * 1e3);
+            // The phases plus what they do not cover. A total that far exceeds the sum means
+            // the time is going somewhere none of these buckets measures -- norms, sampling,
+            // allocation, thread-pool dispatch -- and chasing the buckets would be wasted.
+            let total = t_all.elapsed().as_secs_f64();
+            let sum: f64 = tm.iter().sum();
+            eprintln!(
+                "step m={m}: qkv {:.1} | norm/rope/kv {:.1} | attn {:.1} | o {:.1} | mlp {:.1} | head {:.1} | other {:.1} = {:.1} ms  ({:.1} tok/s at this rate)",
+                tm[0] * 1e3, tm[1] * 1e3, tm[2] * 1e3, tm[3] * 1e3, tm[4] * 1e3, tm[5] * 1e3,
+                (total - sum).max(0.0) * 1e3, total * 1e3, m as f64 / total,
+            );
         }
         logits.chunks(c.vocab).map(|l| l.to_vec()).collect()
     }
