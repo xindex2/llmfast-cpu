@@ -17,10 +17,15 @@ printf '{ "file_format_version": "1.0.0", "ICD": { "library_path": "libGLX_nvidi
 echo "== driver userspace libraries the mount omits (SPIR-V compiler etc.)"
 V=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
 RUN=/workspace/NVIDIA-Linux-x86_64-$V.run
-if [ ! -f "$RUN" ]; then
+# -s, not -f: a failed curl leaves a 0-byte file behind, and existence-checking it means every
+# later run "extracts" an empty archive and silently fixes nothing. Size is the health check.
+if [ ! -s "$RUN" ]; then
+  rm -f "$RUN"
   curl -fLo "$RUN" "https://us.download.nvidia.com/tesla/$V/NVIDIA-Linux-x86_64-$V.run" \
-    || curl -fLo "$RUN" "https://download.nvidia.com/XFree86/Linux-x86_64/$V/NVIDIA-Linux-x86_64-$V.run"
+    || curl -fLo "$RUN" "https://download.nvidia.com/XFree86/Linux-x86_64/$V/NVIDIA-Linux-x86_64-$V.run" \
+    || { rm -f "$RUN"; echo "!! driver download failed for $V — vulkan fix cannot proceed"; }
 fi
+[ -s "$RUN" ] && echo "   installer: $(du -h "$RUN" | cut -f1)"
 rm -rf /tmp/nvd
 sh "$RUN" --extract-only --target /tmp/nvd >/dev/null || true
 added=0
