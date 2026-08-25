@@ -53,9 +53,28 @@ vulkaninfo --summary | grep -E "deviceName|driverName"          # must list your
 curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/install.sh | bash
 ```
 
-If `vulkaninfo` shows no device, the container is missing the NVIDIA Vulkan ICD. Fix: start the
-pod with env `NVIDIA_DRIVER_CAPABILITIES=all` (RunPod → Edit Pod → Environment Variables), or
-`apt-get install -y libnvidia-gl-<driver-major>` matching `nvidia-smi`'s driver version.
+If `vulkaninfo` errors with `ERROR_INCOMPATIBLE_DRIVER` / "Found no drivers", fix it in this
+order (learned the hard way on a real A40 pod):
+
+1. **Env var** — pod env `NVIDIA_DRIVER_CAPABILITIES=all` (RunPod → Edit Pod → Environment
+   Variables; this resets the container). Default pods mount only the compute slice of the
+   driver — no Vulkan libraries at all.
+2. **The missing manifest** — with the env var set, RunPod mounts the libraries
+   (`ls /usr/lib/x86_64-linux-gnu/ | grep glcore` shows them) but often NOT the loader
+   manifest, and Vulkan still fails. Write it yourself:
+
+   ```bash
+   mkdir -p /usr/share/vulkan/icd.d
+   printf '{ "file_format_version": "1.0.0", "ICD": { "library_path": "libGLX_nvidia.so.0", "api_version": "1.3.277" } }\n' > /usr/share/vulkan/icd.d/nvidia_icd.json
+   ```
+
+Do NOT `apt-get install libnvidia-gl-*` in a RunPod container: the repo's point release will
+not match the host kernel module (userspace and kernel must match exactly), and dpkg fails
+with "Invalid cross-device link" on the bind-mounted driver files anyway.
+
+**Container resets**: every Edit Pod wipes everything outside `/workspace`. Put models on the
+volume (`MODELS_DIR=/workspace/models` in gateway.env) so a reset costs a 2-minute reinstall,
+not a re-download.
 
 Containers have no systemd, so start the gateway with:
 
