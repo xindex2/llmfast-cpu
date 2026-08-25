@@ -378,19 +378,24 @@ fn bench_model(dir: &str) {
     let t0 = Instant::now();
     let model = model::Model::load(dir);
     let _load_s = t0.elapsed().as_secs_f32();
-    let cfg = &model.config;
     // Exact numbers from the loaded weights, not re-derived from config — the first version
     // re-derived and printed 7.08B for a model the loader itself called 25.62B.
     let (params, active_bytes) = model.stats;
+    let cfg = model.config.clone();
+    let cfg = &cfg;
     let gb_per_token = active_bytes as f64 / 1e9;
 
     let tokenizer = tokenizer::Tokenizer::load(&format!("{dir}/tokenizer.json"));
     let prompt = "The future of artificial intelligence";
     let ids = tokenizer.encode(prompt);
 
-    let mut cache = model::KvCache::new(cfg);
+    // Same device selection production uses: DEVICE=gpu benches the GPU path, auto/cpu the CPU.
+    let num_experts = cfg.num_experts;
+    let net = build_net(model);
+    let device = net.device();
+    let mut cache = net.new_cache();
     let t = Instant::now();
-    let mut logits = model.forward_batch(&ids, &mut cache);
+    let mut logits = net.forward_batch(&ids, &mut cache);
     let prefill_s = t.elapsed().as_secs_f32();
 
     // Time N decode steps
@@ -402,7 +407,7 @@ fn bench_model(dir: &str) {
         if next == tokenizer.im_end || next == tokenizer.eos {
             break;
         }
-        logits = model.forward_multi(&[(next, 0)], &mut [&mut cache]).pop().unwrap();
+        logits = net.forward_multi(&[(next, 0)], &mut [&mut cache], false).pop().unwrap();
     }
     let decode_s = t.elapsed().as_secs_f32();
     let tok_per_s = n_decode as f32 / decode_s;
@@ -413,13 +418,13 @@ fn bench_model(dir: &str) {
     // is going somewhere other than streaming weights — run with PROFILE=1 to see where.
     let gbs = gb_per_token * tok_per_s as f64;
     eprintln!(
-        "bench-model: {}\n  {:.2}B params · {:.2} GB streamed/token ({})\n  prefill {} tok in {:.1}s, decode {} tok in {:.2}s ({:.1} tok/s -> {gbs:.1} GB/s achieved)\n  build {} · {} threads · simd {} · {} decode · MoE {}",
+        "bench-model: {} ({device})\n  {:.2}B params · {:.2} GB streamed/token ({})\n  prefill {} tok in {:.1}s, decode {} tok in {:.2}s ({:.1} tok/s -> {gbs:.1} GB/s achieved)\n  build {} · {} threads · simd {} · {} decode · MoE {}",
         dir,
         params as f64 / 1e9, gb_per_token,
         std::env::var("QUANT").unwrap_or_else(|_| "bf16".into()),
         ids.len(), prefill_s, n_decode, decode_s, tok_per_s,
         COMMIT, pool::global().threads(), simd, if i8 { "int8" } else { "float" },
-        if cfg.num_experts > 0 { format!("{} experts, top-{}", cfg.num_experts, cfg.experts_per_tok) } else { "no (dense)".into() },
+        if num_experts > 0 { format!("{num_experts} experts") } else { "no (dense)".into() },
     );
 }
 

@@ -497,13 +497,26 @@ impl Model {
 
     /// v1 GPU backend handles plain Qwen3 dense: softmax attention without gates, full rotary.
     pub fn gpu_supported(&self) -> bool {
-        self.layers_mlp_dense()
+        // MoE runs on the GPU when its shapes fit the tiled kernels: every expert's row counts
+        // must be 64-aligned (each expert's tiles are then self-contained inside the one big
+        // concatenated buffer) and the router shader holds at most 256 experts.
+        let mlp_ok = self.layers.iter().all(|l| match &l.mlp {
+            Mlp::Dense(_) => true,
+            Mlp::Moe { .. } => {
+                self.config.num_experts <= 256
+                    && (2 * self.config.moe_intermediate) % 64 == 0
+                    && self.config.hidden % 64 == 0
+                    && self.config.moe_intermediate % 32 == 0
+            }
+        });
+        mlp_ok
             && self.config.lin.is_none()
             && !self.config.attn_gate
             && self.config.rotary_dim == self.config.head_dim
     }
 
-    /// True when every MLP is dense (the GPU backend doesn't do MoE yet).
+    /// True when every MLP is dense.
+    #[allow(dead_code)] // diagnostics; gpu_supported now takes MoE too
     pub fn layers_mlp_dense(&self) -> bool {
         self.layers.iter().all(|l| matches!(l.mlp, Mlp::Dense(_)))
     }
@@ -1489,6 +1502,100 @@ mod tests {
         Model { mtp: None, lm_head: Weight::Bf16 { w: embed.clone(), n: config.vocab, k: config.hidden }, embed, norm: vec![1.0; config.hidden], layers, inv_freq, config, stats: (0, 0) }
     }
 
+    /// Quantize every weight to q8 in place — the GPU backend takes q8 only, and comparing
+    /// CPU-q8 against GPU-q8 isolates the shader math from quantization error.
+    fn to_q8(m: &mut Model) {
+        let conv = |w: &mut Weight| {
+            if let Weight::Bf16 { w: data, n, k } = w {
+                *w = Weight::Q8(crate::kernels::QMat::from_bf16(data, *n, *k));
+            }
+        };
+        for l in &mut m.layers {
+            match &mut l.attn {
+                Attn::Full { wq, wk, wv, wo, .. } => {
+                    conv(wq); conv(wk); conv(wv); conv(wo);
+                }
+                Attn::Lin { .. } => unreachable!("test models are softmax-attention"),
+            }
+            match &mut l.mlp {
+                Mlp::Dense(e) => { conv(&mut e.w_gate); conv(&mut e.w_up); conv(&mut e.w_down); }
+                Mlp::Moe { experts, .. } => for e in experts { conv(&mut e.w_gate); conv(&mut e.w_up); conv(&mut e.w_down); },
+            }
+        }
+        conv(&mut m.lm_head);
+    }
+
+    // Same comparison for a dense model: the MoE work refactored the dense GPU layer path
+    // (GLayer/GMlp), and only a test pins it.
+    #[test]
+    fn gpu_dense_matches_cpu() {
+        let Some(g) = crate::gpu::Gpu::init() else {
+            eprintln!("no GPU adapter — skipping gpu_dense_matches_cpu");
+            return;
+        };
+        let mut m = tiny_moe();
+        // swap every MoE mlp for a dense one of the same shapes
+        for (li, l) in m.layers.iter_mut().enumerate() {
+            l.mlp = Mlp::Dense(Expert {
+                w_gate: rand_w(m.config.intermediate, m.config.hidden, 400 + li as u32),
+                w_up: rand_w(m.config.intermediate, m.config.hidden, 500 + li as u32),
+                w_down: rand_w(m.config.hidden, m.config.intermediate, 600 + li as u32),
+            });
+        }
+        m.config.num_experts = 0;
+        to_q8(&mut m);
+        assert!(m.gpu_supported());
+        let gm = crate::gpu_model::GpuModel::from_cpu(g, &m);
+        let toks = [5u32, 30, 71];
+        let mut cc = KvCache::new(&m.config);
+        let mut gc = gm.new_cache();
+        let cpu = m.forward_batch(&toks, &mut cc);
+        let gpu = gm.forward_batch(&toks, &mut gc);
+        let peak = cpu.iter().fold(0f32, |a, v| a.max(v.abs())).max(1e-6);
+        let err = cpu.iter().zip(&gpu).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err / peak < 0.03, "dense gpu vs cpu: {err} = {:.1}% of {peak}", err / peak * 100.0);
+    }
+
+    // The GPU MoE path (on-GPU routing, expert-indexed matvec, weighted reduce) against the
+    // CPU reference, prefill then decode, on whatever adapter this machine has. Skips cleanly
+    // on a machine with no GPU. Same q8 codes on both sides, so the only differences are
+    // f32 rounding and the int8 KV cache the CPU uses by default.
+    #[test]
+    fn gpu_moe_matches_cpu() {
+        let Some(g) = crate::gpu::Gpu::init() else {
+            eprintln!("no GPU adapter — skipping gpu_moe_matches_cpu");
+            return;
+        };
+        let mut m = tiny_moe();
+        to_q8(&mut m);
+        assert!(m.gpu_supported(), "tiny_moe must satisfy gpu_supported");
+        let gm = crate::gpu_model::GpuModel::from_cpu(g, &m);
+        let toks = [3u32, 17, 42, 7, 99];
+        let mut cc = KvCache::new(&m.config);
+        let mut gc = gm.new_cache();
+        let cpu = m.forward_batch(&toks, &mut cc);
+        let gpu = gm.forward_batch(&toks, &mut gc);
+        let check = |cpu: &[f32], gpu: &[f32], what: &str| {
+            let peak = cpu.iter().fold(0f32, |a, v| a.max(v.abs())).max(1e-6);
+            let err = cpu.iter().zip(gpu).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(err / peak < 0.03, "{what}: max abs err {err} = {:.1}% of peak {peak}", err / peak * 100.0);
+            let am_c = (0..cpu.len()).max_by(|&a, &b| cpu[a].total_cmp(&cpu[b])).unwrap();
+            let am_g = (0..gpu.len()).max_by(|&a, &b| gpu[a].total_cmp(&gpu[b])).unwrap();
+            assert_eq!(am_c, am_g, "{what}: argmax differs");
+        };
+        check(&cpu, &gpu, "prefill logits");
+        // decode a few greedy tokens on both sides — exercises the m=1 slot path and the cache
+        let mut tc = (0..cpu.len()).max_by(|&a, &b| cpu[a].total_cmp(&cpu[b])).unwrap() as u32;
+        let mut tg = tc;
+        for step in 0..4 {
+            let lc = m.forward(tc, &mut cc);
+            let lg = gm.forward_multi(&[(tg, 0)], &mut [&mut gc]).pop().unwrap();
+            check(&lc, &lg, &format!("decode step {step}"));
+            tc = (0..lc.len()).max_by(|&a, &b| lc[a].total_cmp(&lc[b])).unwrap() as u32;
+            tg = (0..lg.len()).max_by(|&a, &b| lg[a].total_cmp(&lg[b])).unwrap() as u32;
+            assert_eq!(tc, tg, "decode diverged at step {step}");
+        }
+    }
     #[test]
     fn moe_batched_matches_sequential() {
         let m = tiny_moe();

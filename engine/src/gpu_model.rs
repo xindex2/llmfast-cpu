@@ -37,16 +37,36 @@ struct GLayer {
     k_norm: wgpu::Buffer,
     wqkv: GQ8,
     wo: GQ8,
-    wgu: GQ8,
-    wdown: GQ8,
     // static bind groups
     bg_norm1: wgpu::BindGroup,
     bg_norm2: wgpu::BindGroup,
     bg_qkv: wgpu::BindGroup,
     bg_rope: wgpu::BindGroup,
     bg_o: wgpu::BindGroup,
-    bg_gu: wgpu::BindGroup,
-    bg_down: wgpu::BindGroup,
+    mlp: GMlp,
+}
+
+/// Dense MLP or mixture of experts. MoE keeps every expert's gate|up (and down) rows in ONE
+/// GQ8 buffer, tiled per expert; the shader indexes it by the routed expert id, so only the
+/// chosen experts' weights are streamed and routing never leaves the GPU.
+#[allow(dead_code)] // buffers kept alive for the bind groups that reference them
+enum GMlp {
+    Dense { wgu: GQ8, wdown: GQ8, bg_gu: wgpu::BindGroup, bg_down: wgpu::BindGroup },
+    Moe { router: wgpu::Buffer, wgu: GQ8, wdown: GQ8, bg_router: wgpu::BindGroup, bg_gu: wgpu::BindGroup, bg_down: wgpu::BindGroup },
+}
+
+/// Model-wide MoE scratch: slot activations ((token, choice) pairs) and routing, shared by
+/// every MoE layer the same way x/hn/gu are shared by dense ones.
+#[allow(dead_code)]
+struct GMoe {
+    routing: wgpu::Buffer, // (MAXM*topk) vec2<u32>: expert id, weight bits
+    gu: wgpu::Buffer,      // (MAXM*topk) x 2*moe_inter
+    act: wgpu::Buffer,     // (MAXM*topk) x moe_inter
+    down: wgpu::Buffer,    // (MAXM*topk) x hidden
+    lp_moe: wgpu::Buffer,  // LayerParams with m = items*topk, inter = moe_inter
+    mo: wgpu::Buffer,      // MoeParams uniform
+    bg_silu: wgpu::BindGroup,
+    bg_reduce: wgpu::BindGroup,
 }
 
 struct Pipelines {
@@ -64,6 +84,12 @@ struct Pipelines {
     silu_l: wgpu::BindGroupLayout,
     kv_store: wgpu::ComputePipeline,
     kv_store_l: wgpu::BindGroupLayout,
+    router: wgpu::ComputePipeline,
+    router_l: wgpu::BindGroupLayout,
+    moe_mv: wgpu::ComputePipeline,
+    moe_mv_l: wgpu::BindGroupLayout,
+    moe_red: wgpu::ComputePipeline,
+    moe_red_l: wgpu::BindGroupLayout,
 }
 
 #[allow(dead_code)] // same: buffers kept alive for the bind groups that reference them
@@ -95,6 +121,7 @@ pub struct GpuModel {
     bg_silu: wgpu::BindGroup,
     bg_norm_last: wgpu::BindGroup,
     bg_head: wgpu::BindGroup,
+    moe: Option<GMoe>,
     qd: usize,
     kd: usize,
 }
@@ -179,7 +206,10 @@ impl GpuModel {
         let (add, add_l) = mk("add_inplace", &[storage_entry(0, false), storage_entry(1, true), uniform_entry(2, false)]);
         let (silu, silu_l) = mk("silu_mul", &[storage_entry(0, true), storage_entry(1, false), uniform_entry(2, false)]);
         let (kv_store, kv_store_l) = mk("kv_store", &[storage_entry(0, true), storage_entry(1, false), storage_entry(2, false), uniform_entry(3, false), storage_entry(4, true), uniform_entry(5, true)]);
-        let p = Pipelines { matvec, matvec_l, rmsnorm, rmsnorm_l, rope, rope_l, attention, attention_l, add, add_l, silu, silu_l, kv_store, kv_store_l };
+        let (router, router_l) = mk("router_topk", &[storage_entry(0, true), storage_entry(1, true), storage_entry(2, false), uniform_entry(3, false), uniform_entry(4, false)]);
+        let (moe_mv, moe_mv_l) = mk("moe_matvec_q8", &[storage_entry(0, true), storage_entry(1, true), storage_entry(2, true), storage_entry(3, false), uniform_entry(4, false), storage_entry(5, true), uniform_entry(6, false)]);
+        let (moe_red, moe_red_l) = mk("moe_reduce", &[storage_entry(0, true), storage_entry(1, true), storage_entry(2, false), uniform_entry(3, false), uniform_entry(4, false)]);
+        let p = Pipelines { matvec, matvec_l, rmsnorm, rmsnorm_l, rope, rope_l, attention, attention_l, add, add_l, silu, silu_l, kv_store, kv_store_l, router, router_l, moe_mv, moe_mv_l, moe_red, moe_red_l };
 
         let f32buf = |v: &[f32], label: &str| dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: as_bytes(v), usage: wgpu::BufferUsages::STORAGE });
         let st = |n: usize, label: &str| gpu.storage(n * 4, label);
@@ -188,8 +218,8 @@ impl GpuModel {
         let qkv = st(MAXM * (qd + 2 * kd), "qkv");
         let attn = st(MAXM * qd, "attn");
         let o = st(MAXM * c.hidden, "o");
-        let gu = st(MAXM * 2 * c.intermediate, "gu");
-        let act = st(MAXM * c.intermediate, "act");
+        let gu = st(MAXM * 2 * c.intermediate.max(1), "gu");
+        let act = st(MAXM * c.intermediate.max(1), "act");
         let xl = st(MAXM * c.hidden, "xl");
         let xln = st(MAXM * c.hidden, "xln");
         let logits = st(16 * c.vocab, "logits");
@@ -200,37 +230,90 @@ impl GpuModel {
         let seqp = dev.create_buffer(&wgpu::BufferDescriptor { label: Some("seqp"), size: (64 * 256) as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let inv_freq = f32buf(&m.inv_freq, "inv_freq");
 
+        // MoE scratch, shared by every MoE layer (None for a dense-only model)
+        let has_moe = m.layers.iter().any(|l| matches!(l.mlp, Mlp::Moe { .. }));
+        let moe = if has_moe {
+            let (ne, topk, mi) = (c.num_experts, c.experts_per_tok, c.moe_intermediate);
+            assert!(ne <= 256, "router shader holds at most 256 experts");
+            assert!((2 * mi) % 64 == 0 && c.hidden % 64 == 0 && mi % 32 == 0, "MoE shapes must be tile-aligned");
+            let routing = gpu.storage(MAXM * topk * 8, "routing");
+            let gu_moe = st(MAXM * topk * 2 * mi, "gu_moe");
+            let act_moe = st(MAXM * topk * mi, "act_moe");
+            let down_moe = st(MAXM * topk * c.hidden, "down_moe");
+            let lp_moe = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("lp_moe"),
+                contents: as_bytes(&[LayerParams { m: 1, hidden: c.hidden as u32, heads: 0, kv_heads: 0, head_dim: 0, inter: mi as u32, eps: c.eps, pad: 0 }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let mo = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mo"),
+                contents: as_bytes(&[ne as u32, topk as u32, mi as u32, c.norm_topk_prob as u32]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg_silu = bg(dev, &p.silu_l, &[&gu_moe, &act_moe, &lp_moe]);
+            let bg_reduce = bg(dev, &p.moe_red_l, &[&down_moe, &routing, &o, &lp, &mo]);
+            Some(GMoe { routing, gu: gu_moe, act: act_moe, down: down_moe, lp_moe, mo, bg_silu, bg_reduce })
+        } else {
+            None
+        };
+
         let mut layers = Vec::with_capacity(c.layers);
         for l in &m.layers {
-            let (wg, wu, wd) = match &l.mlp {
-                Mlp::Dense(e) => (q8(&e.w_gate), q8(&e.w_up), q8(&e.w_down)),
-                Mlp::Moe { .. } => panic!("GPU backend: MoE not implemented yet"),
-            };
             let (lwq, lwk, lwv, lwo, lqn, lkn) = match &l.attn {
                 crate::model::Attn::Full { wq, wk, wv, wo, q_norm, k_norm, gate: false } => (wq, wk, wv, wo, q_norm, k_norm),
                 _ => panic!("GPU backend v1 supports plain softmax attention only (use DEVICE=cpu)"),
             };
             let qkv_m = concat_q8(&[q8(lwq), q8(lwk), q8(lwv)]);
-            let gu_m = concat_q8(&[wg, wu]);
             let wqkv = gpu.upload_q8(&qkv_m.q, &qkv_m.scales, qkv_m.n, qkv_m.k);
             let wo = gpu.upload_q8(&q8(lwo).q, &q8(lwo).scales, q8(lwo).n, q8(lwo).k);
-            let wgu = gpu.upload_q8(&gu_m.q, &gu_m.scales, gu_m.n, gu_m.k);
-            let wdown = gpu.upload_q8(&wd.q, &wd.scales, wd.n, wd.k);
             let ln1 = f32buf(&l.ln1, "ln1");
             let ln2 = f32buf(&l.ln2, "ln2");
             let q_norm = f32buf(lqn, "q_norm");
             let k_norm = f32buf(lkn, "k_norm");
             let mp = |w: &GQ8| dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("mp"), contents: as_bytes(&[w.n as u32, w.k as u32, 0u32, 0u32]), usage: wgpu::BufferUsages::UNIFORM });
-            let (mp_qkv, mp_o, mp_gu, mp_down) = (mp(&wqkv), mp(&wo), mp(&wgu), mp(&wdown));
+            let (mp_qkv, mp_o) = (mp(&wqkv), mp(&wo));
+            let mlp = match &l.mlp {
+                Mlp::Dense(e) => {
+                    let gu_m = concat_q8(&[q8(&e.w_gate), q8(&e.w_up)]);
+                    let wgu = gpu.upload_q8(&gu_m.q, &gu_m.scales, gu_m.n, gu_m.k);
+                    let wd = q8(&e.w_down);
+                    let wdown = gpu.upload_q8(&wd.q, &wd.scales, wd.n, wd.k);
+                    let (mp_gu, mp_down) = (mp(&wgu), mp(&wdown));
+                    GMlp::Dense {
+                        bg_gu: bg(dev, &p.matvec_l, &[&wgu.q, &wgu.scales, &hn, &gu, &mp_gu, &lp]),
+                        bg_down: bg(dev, &p.matvec_l, &[&wdown.q, &wdown.scales, &act, &o, &mp_down, &lp]),
+                        wgu, wdown,
+                    }
+                }
+                Mlp::Moe { router, experts } => {
+                    let mb = moe.as_ref().unwrap();
+                    let mi = c.moe_intermediate;
+                    // one buffer per matrix kind, every expert's rows concatenated: expert e's
+                    // tiles start at e * rows_per_expert/64 because rows_per_expert % 64 == 0
+                    let gu_parts: Vec<QMat> = experts.iter().map(|e| concat_q8(&[q8(&e.w_gate), q8(&e.w_up)])).collect();
+                    let gu_all = concat_q8(&gu_parts.iter().collect::<Vec<_>>());
+                    let down_all = concat_q8(&experts.iter().map(|e| q8(&e.w_down)).collect::<Vec<_>>());
+                    let wgu = gpu.upload_q8(&gu_all.q, &gu_all.scales, gu_all.n, gu_all.k);
+                    let wdown = gpu.upload_q8(&down_all.q, &down_all.scales, down_all.n, down_all.k);
+                    let rbuf = f32buf(router, "router");
+                    // mp.n = rows PER EXPERT; mp._pad picks the x row (0: token's hn, 1: the slot's act row)
+                    let mp_gu = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("mp"), contents: as_bytes(&[(2 * mi) as u32, c.hidden as u32, 0u32, 0u32]), usage: wgpu::BufferUsages::UNIFORM });
+                    let mp_down = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("mp"), contents: as_bytes(&[c.hidden as u32, mi as u32, 0u32, 1u32]), usage: wgpu::BufferUsages::UNIFORM });
+                    GMlp::Moe {
+                        bg_router: bg(dev, &p.router_l, &[&rbuf, &hn, &mb.routing, &lp, &mb.mo]),
+                        bg_gu: bg(dev, &p.moe_mv_l, &[&wgu.q, &wgu.scales, &hn, &mb.gu, &mp_gu, &mb.routing, &mb.mo]),
+                        bg_down: bg(dev, &p.moe_mv_l, &[&wdown.q, &wdown.scales, &mb.act, &mb.down, &mp_down, &mb.routing, &mb.mo]),
+                        router: rbuf, wgu, wdown,
+                    }
+                }
+            };
             layers.push(GLayer {
                 bg_norm1: bg(dev, &p.rmsnorm_l, &[&x, &ln1, &hn, &lp]),
                 bg_norm2: bg(dev, &p.rmsnorm_l, &[&x, &ln2, &hn, &lp]),
                 bg_qkv: bg(dev, &p.matvec_l, &[&wqkv.q, &wqkv.scales, &hn, &qkv, &mp_qkv, &lp]),
                 bg_rope: bg(dev, &p.rope_l, &[&qkv, &q_norm, &k_norm, &inv_freq, &lp, &items]),
                 bg_o: bg(dev, &p.matvec_l, &[&wo.q, &wo.scales, &attn, &o, &mp_o, &lp]),
-                bg_gu: bg(dev, &p.matvec_l, &[&wgu.q, &wgu.scales, &hn, &gu, &mp_gu, &lp]),
-                bg_down: bg(dev, &p.matvec_l, &[&wdown.q, &wdown.scales, &act, &o, &mp_down, &lp]),
-                ln1, ln2, q_norm, k_norm, wqkv, wo, wgu, wdown,
+                ln1, ln2, q_norm, k_norm, wqkv, wo, mlp,
             });
         }
         let head = q8(&m.lm_head);
@@ -243,7 +326,7 @@ impl GpuModel {
         let bg_head = bg(dev, &p.matvec_l, &[&lm_head.q, &lm_head.scales, &xln, &logits, &mp_head, &lp_last]);
         let _ = &layers[0].ln1; // keep buffers alive via struct
         eprintln!("gpu model ready on {} in {:.1}s ({} layers, fused qkv/gate-up)", gpu.name, t0.elapsed().as_secs_f32(), layers.len());
-        GpuModel { config: c, gpu, p, embed: m.embed.clone(), layers, norm, lm_head, inv_freq, x, hn, qkv, attn, o, gu, act, xl, xln, logits, lp, lp_last, items, seqp, bg_add_o, bg_silu, bg_norm_last, bg_head, qd, kd }
+        GpuModel { config: c, gpu, p, embed: m.embed.clone(), layers, norm, lm_head, inv_freq, x, hn, qkv, attn, o, gu, act, xl, xln, logits, lp, lp_last, items, seqp, bg_add_o, bg_silu, bg_norm_last, bg_head, moe, qd, kd }
     }
 
     pub fn new_cache(&self) -> GpuKv {
@@ -342,6 +425,12 @@ impl GpuModel {
         let lpv = LayerParams { m: m as u32, hidden: c.hidden as u32, heads: h as u32, kv_heads: kvh as u32, head_dim: hd as u32, inter: c.intermediate as u32, eps: c.eps, pad: 0 };
         gpu.queue.write_buffer(&self.lp, 0, as_bytes(&[lpv]));
         gpu.queue.write_buffer(&self.lp_last, 0, as_bytes(&[LayerParams { m: lasts.len() as u32, ..lpv }]));
+        if let Some(mb) = &self.moe {
+            // The MoE scratch is addressed per (token, choice) slot: m*topk rows of moe_inter.
+            gpu.queue.write_buffer(&mb.lp_moe, 0, as_bytes(&[LayerParams {
+                m: (m * c.experts_per_tok) as u32, inter: c.moe_intermediate as u32, ..lpv
+            }]));
+        }
         let itemv: Vec<[u32; 4]> = (0..m).map(|j| [j as u32, pos[j], items[j].1 as u32, 0]).collect();
         gpu.queue.write_buffer(&self.items, 0, as_bytes(&itemv));
         let mut seqv = vec![0u32; ranges.len() * 64];
@@ -385,15 +474,39 @@ impl GpuModel {
             pass.set_pipeline(&self.p.rmsnorm);
             pass.set_bind_group(0, &l.bg_norm2, &[]);
             pass.dispatch_workgroups(m as u32, 1, 1);
-            pass.set_pipeline(&self.p.matvec);
-            pass.set_bind_group(0, &l.bg_gu, &[]);
-            pass.dispatch_workgroups(((l.wgu.n + 63) / 64) as u32, 1, 1);
-            pass.set_pipeline(&self.p.silu);
-            pass.set_bind_group(0, &self.bg_silu, &[]);
-            pass.dispatch_workgroups(wg(m * c.intermediate), 1, 1);
-            pass.set_pipeline(&self.p.matvec);
-            pass.set_bind_group(0, &l.bg_down, &[]);
-            pass.dispatch_workgroups(((l.wdown.n + 63) / 64) as u32, 1, 1);
+            match &l.mlp {
+                GMlp::Dense { bg_gu, bg_down, wgu, wdown } => {
+                    pass.set_pipeline(&self.p.matvec);
+                    pass.set_bind_group(0, bg_gu, &[]);
+                    pass.dispatch_workgroups(((wgu.n + 63) / 64) as u32, 1, 1);
+                    pass.set_pipeline(&self.p.silu);
+                    pass.set_bind_group(0, &self.bg_silu, &[]);
+                    pass.dispatch_workgroups(wg(m * c.intermediate), 1, 1);
+                    pass.set_pipeline(&self.p.matvec);
+                    pass.set_bind_group(0, bg_down, &[]);
+                    pass.dispatch_workgroups(((wdown.n + 63) / 64) as u32, 1, 1);
+                }
+                GMlp::Moe { bg_router, bg_gu, bg_down, .. } => {
+                    let mb = self.moe.as_ref().unwrap();
+                    let (mi, topk) = (c.moe_intermediate, c.experts_per_tok);
+                    let slots = (m * topk) as u32;
+                    pass.set_pipeline(&self.p.router);
+                    pass.set_bind_group(0, bg_router, &[]);
+                    pass.dispatch_workgroups(m as u32, 1, 1);
+                    pass.set_pipeline(&self.p.moe_mv);
+                    pass.set_bind_group(0, bg_gu, &[]);
+                    pass.dispatch_workgroups((2 * mi / 64) as u32, slots, 1);
+                    pass.set_pipeline(&self.p.silu);
+                    pass.set_bind_group(0, &mb.bg_silu, &[]);
+                    pass.dispatch_workgroups(wg(m * topk * mi), 1, 1);
+                    pass.set_pipeline(&self.p.moe_mv);
+                    pass.set_bind_group(0, bg_down, &[]);
+                    pass.dispatch_workgroups((c.hidden / 64) as u32, slots, 1);
+                    pass.set_pipeline(&self.p.moe_red);
+                    pass.set_bind_group(0, &mb.bg_reduce, &[]);
+                    pass.dispatch_workgroups(wg(m * c.hidden), 1, 1);
+                }
+            }
             pass.set_pipeline(&self.p.add);
             pass.set_bind_group(0, &self.bg_add_o, &[]);
             pass.dispatch_workgroups(wg(m * c.hidden), 1, 1);

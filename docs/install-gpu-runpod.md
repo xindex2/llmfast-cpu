@@ -5,9 +5,29 @@ which talks to **Vulkan** on Linux (NVIDIA and AMD). There is no CUDA dependency
 on any card with a Vulkan driver. The same binary auto-detects the GPU; if the model doesn't
 fit (or no GPU is found) it falls back to the CPU engine.
 
-> Status: the GPU path is validated bit-exact against the CPU engine (Metal, AMD). NVIDIA/Vulkan
-> is the same code through a different driver — run `--gpu-check` first (step 3). If anything
-> fails, `DEVICE=cpu` keeps you serving while you report the issue.
+> Status: the GPU path is validated bit-exact against the CPU engine (Metal, AMD), dense AND
+> mixture-of-experts. NVIDIA/Vulkan is the same code through a different driver — run
+> `--gpu-check` first (step 3). If anything fails, `DEVICE=cpu` keeps you serving while you
+> report the issue.
+
+## 0. What a card can actually deliver (read this before renting)
+
+Decode streams the model's active bytes once per token, so tok/s ≈ card bandwidth ÷ GB/token.
+No software change beats this — pick the model/card pair from the arithmetic:
+
+| model | GB/token (q8) | A40 (696 GB/s) | 4090 (1008) | A100-80G (2039) |
+|---|---|---|---|---|
+| Qwen3-30B-A3B (MoE, 3B active) | ~3.3 | **~150 ceiling** | ~220 | ~440 |
+| Qwen3-14B dense | ~15 | ~45 | ~65 | ~135 |
+| Qwen3.8-27B (DeltaNet hybrid) | 28.85 | — CPU only, see below | — | — |
+
+- **Qwen3-30B-A3B on an A40 is the 100-tok/s configuration.** MoE routing runs on the GPU and
+  only the routed experts' weights are streamed. Weights are ~32 GB q8 — fits 48 GB VRAM.
+- **Qwen3.8-27B does not run on the GPU backend** (its Gated-DeltaNet layers, attention gate
+  and partial rotary are CPU-only), and even if it did, 28.85 GB/token puts 100 tok/s beyond
+  every card short of an H100. Serve it on CPU or not at all.
+- Ceilings are upper bounds; real decode lands beneath them (norms, attention, dispatch).
+  Measure with `--bench-model` (step 3) before quoting numbers to OpenRouter.
 
 ## 1. Pick a pod
 
@@ -53,7 +73,11 @@ nohup ./start.sh > gateway.log 2>&1 &
 cd /opt/llmfast/engine
 MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine --gpu-bench    # kernel vs CPU, GB/s
 MODEL=../models/qwen3-0.6b ./target/release/llmfast-engine --gpu-check    # full forward: GPU logits == CPU logits
+QUANT=q8 DEVICE=gpu GPU_MEM_MB=49152 ./llmfast-engine --bench-model /opt/llmfast/models/qwen3-30b-a3b
 ```
+
+`--bench-model` prints GB streamed/token, measured tok/s and achieved GB/s against the card —
+that line, not the ceiling table, is what goes in the OpenRouter application.
 
 Expect `max abs err 0.0000` and matching argmax. On an NVIDIA card the decode number should be
 several times the CPU number (the design is bandwidth-bound at ~15 µs per dispatch on Vulkan).
@@ -64,8 +88,11 @@ Admin UI: `https://<pod-id>-8080.proxy.runpod.net/admin/ui` → Settings (base U
 admin token from `gateway.env`) → Models → e.g. `Qwen/Qwen3-30B-A3B`, quant `q8` (24 GB+ cards)
 or `q4`, device `auto` → start engine. The Dashboard shows which device each engine landed on.
 
-Current GPU limitations (CPU fallback is automatic): MoE models run on CPU (GPU MoE is next),
-GPU context is capped at 2048 tokens, and very old GPU drivers may be dispatch-overhead-bound.
+Current GPU limitations (CPU fallback is automatic): **GPU context is capped at 2048 tokens**
+(the attention shader's shared-memory tile — fine for benchmarking and short-context serving,
+not yet for long-context customers), and very old GPU drivers may be dispatch-overhead-bound.
+Loading stages the q8 model in CPU RAM before upload, so the pod needs RAM ≥ model size + a
+few GB (a 50 GB pod fits the 32 GB 30B-A3B).
 
 ## 5. Going live
 

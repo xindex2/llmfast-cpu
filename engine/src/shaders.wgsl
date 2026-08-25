@@ -240,3 +240,130 @@ fn kv_store(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
         ks_v[dst + i] = ks_qkv[src + stride + i];
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Mixture of experts. All experts' weights live in ONE buffer, tiled per expert (rows per
+// expert must be a multiple of 64 so each expert's tiles are self-contained); routing runs
+// on the GPU and the expert matvec indexes the buffer by the routed expert id — so only the
+// chosen experts' weights are ever streamed, which is the entire point of MoE, and nothing
+// ever has to come back to the CPU mid-step.
+// ---------------------------------------------------------------------------------------
+
+struct MoeParams { ne: u32, topk: u32, inter: u32, norm: u32 };
+
+// router_topk: per token, router logits → softmax over all experts → top-k (expert, weight).
+// Mirrors moe_forward in model.rs exactly: weight = prob / (sum of top-k probs if norm else 1).
+@group(0) @binding(0) var<storage, read> ro_w: array<f32>;               // ne × hidden
+@group(0) @binding(1) var<storage, read> ro_x: array<f32>;               // m × hidden (hn)
+@group(0) @binding(2) var<storage, read_write> ro_out: array<vec2<u32>>; // m × topk: (expert, weight bits)
+@group(0) @binding(3) var<uniform> ro_lp: LayerParams;
+@group(0) @binding(4) var<uniform> ro_mo: MoeParams;
+var<workgroup> ro_logit: array<f32, 256>; // ne <= 256, enforced host-side
+
+@compute @workgroup_size(256)
+fn router_topk(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+    let j = wid.x;
+    let xb = j * ro_lp.hidden;
+    for (var e = lid.x; e < ro_mo.ne; e = e + 256u) {
+        var s = 0.0;
+        let wb = e * ro_lp.hidden;
+        for (var d = 0u; d < ro_lp.hidden; d = d + 1u) { s = s + ro_w[wb + d] * ro_x[xb + d]; }
+        ro_logit[e] = s;
+    }
+    workgroupBarrier();
+    // ne is small (<=256): softmax + repeated argmax serially on one thread beats the
+    // synchronization a parallel version would need.
+    if (lid.x == 0u) {
+        var mx = -1e30;
+        for (var e = 0u; e < ro_mo.ne; e = e + 1u) { mx = max(mx, ro_logit[e]); }
+        var sum = 0.0;
+        for (var e = 0u; e < ro_mo.ne; e = e + 1u) { let v = exp(ro_logit[e] - mx); ro_logit[e] = v; sum = sum + v; }
+        var wsum = 0.0;
+        for (var s = 0u; s < ro_mo.topk; s = s + 1u) {
+            var best = 0u;
+            var bv = -1.0;
+            for (var e = 0u; e < ro_mo.ne; e = e + 1u) { if (ro_logit[e] > bv) { bv = ro_logit[e]; best = e; } }
+            let w = bv / sum;
+            ro_out[j * ro_mo.topk + s] = vec2<u32>(best, bitcast<u32>(w));
+            ro_logit[best] = -1.0;
+            wsum = wsum + w;
+        }
+        if (ro_mo.norm != 0u) {
+            for (var s = 0u; s < ro_mo.topk; s = s + 1u) {
+                let r = ro_out[j * ro_mo.topk + s];
+                ro_out[j * ro_mo.topk + s] = vec2<u32>(r.x, bitcast<u32>(bitcast<f32>(r.y) / wsum));
+            }
+        }
+    }
+}
+
+// moe_matvec_q8: matvec_q8 with expert indirection. Workgroup (row tile, slot); slot
+// s = token * topk + choice reads its routed expert id and streams only that expert's tile
+// range. mp.n = rows per expert; mp._pad selects the input row: 0 = the token's hn row
+// (gate/up), 1 = the slot's own row (down reading the slot's activations).
+@group(0) @binding(0) var<storage, read> mv2_q: array<u32>;
+@group(0) @binding(1) var<storage, read> mv2_s: array<f32>;
+@group(0) @binding(2) var<storage, read> mv2_x: array<f32>;
+@group(0) @binding(3) var<storage, read_write> mv2_y: array<f32>;
+@group(0) @binding(4) var<uniform> mv2_mp: MatParams;
+@group(0) @binding(5) var<storage, read> mv2_route: array<vec2<u32>>;
+@group(0) @binding(6) var<uniform> mv2_mo: MoeParams;
+var<workgroup> mv2_part: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn moe_matvec_q8(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+    let slot = wid.y;
+    let e = mv2_route[slot].x;
+    let lane = lid.x % 64u;
+    let p = lid.x / 64u;
+    let words = mv2_mp.k / 4u;
+    let blocks = mv2_mp.k / 32u;
+    let tile = e * (mv2_mp.n / 64u) + wid.x;
+    let wtile = tile * words * 64u + lane;
+    let stile = tile * blocks * 64u + lane;
+    let xrow = select(slot, slot / mv2_mo.topk, mv2_mp._pad == 0u);
+    let xb = xrow * mv2_mp.k;
+    var acc = 0.0;
+    for (var b = p; b < blocks; b = b + KSPLIT) {
+        var bacc = 0.0;
+        let wb = wtile + b * 8u * 64u;
+        let kb = xb + b * 32u;
+        for (var i = 0u; i < 8u; i = i + 1u) {
+            let b0 = mv2_q[wb + i * 64u];
+            let w4 = vec4<f32>(f32((i32(b0 << 24u)) >> 24u), f32((i32(b0 << 16u)) >> 24u), f32((i32(b0 << 8u)) >> 24u), f32((i32(b0)) >> 24u));
+            let kk = kb + i * 4u;
+            bacc = bacc + dot(w4, vec4<f32>(mv2_x[kk], mv2_x[kk + 1u], mv2_x[kk + 2u], mv2_x[kk + 3u]));
+        }
+        acc = acc + bacc * mv2_s[stile + b * 64u];
+    }
+    mv2_part[lid.x] = acc;
+    workgroupBarrier();
+    let row = wid.x * 64u + lane;
+    if (p == 0u && row < mv2_mp.n) {
+        var total = 0.0;
+        for (var q = 0u; q < KSPLIT; q = q + 1u) { total = total + mv2_part[q * 64u + lane]; }
+        mv2_y[slot * mv2_mp.n + row] = total;
+    }
+}
+
+// moe_reduce: o[token] = Σ over the token's slots of (routing weight × that slot's down row).
+// Overwrites o (the residual add into x happens in the shared add_inplace pass afterwards).
+@group(0) @binding(0) var<storage, read> mr_down: array<f32>;            // (m*topk) × hidden
+@group(0) @binding(1) var<storage, read> mr_route: array<vec2<u32>>;
+@group(0) @binding(2) var<storage, read_write> mr_o: array<f32>;         // m × hidden
+@group(0) @binding(3) var<uniform> mr_lp: LayerParams;
+@group(0) @binding(4) var<uniform> mr_mo: MoeParams;
+@compute @workgroup_size(256)
+fn moe_reduce(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i < mr_lp.m * mr_lp.hidden) {
+        let j = i / mr_lp.hidden;
+        let d = i % mr_lp.hidden;
+        var acc = 0.0;
+        for (var s = 0u; s < mr_mo.topk; s = s + 1u) {
+            let r = mr_route[j * mr_mo.topk + s];
+            acc = acc + bitcast<f32>(r.y) * mr_down[(j * mr_mo.topk + s) * mr_lp.hidden + d];
+        }
+        mr_o[i] = acc;
+    }
+}
