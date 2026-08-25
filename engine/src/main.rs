@@ -44,8 +44,23 @@ fn main() {
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--bench-model") {
-        let dir = args.get(i + 1).map(|s| s.as_str()).unwrap_or(".");
-        bench_model(dir);
+        // Directory from the argument, falling back to MODEL — the first run in the field
+        // set MODEL=... and passed "." as the argument, and "." silently won, so the bench
+        // panicked on /opt/llmfast/config.json instead of using the checkpoint it was given.
+        let dir = args
+            .get(i + 1)
+            .filter(|a| !a.starts_with("--") && a.as_str() != ".")
+            .cloned()
+            .or_else(|| std::env::var("MODEL").ok())
+            .unwrap_or_else(|| {
+                eprintln!("usage: llmfast-engine --bench-model <checkpoint dir>   (or set MODEL=<dir>)");
+                std::process::exit(2);
+            });
+        if !std::path::Path::new(&dir).join("config.json").exists() {
+            eprintln!("no config.json in {dir} — is the model downloaded? (add it in the admin Models page first)");
+            std::process::exit(2);
+        }
+        bench_model(&dir);
         return;
     }
 

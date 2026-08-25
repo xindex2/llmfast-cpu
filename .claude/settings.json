@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(cargo build *)",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "Bash(./target/release/llmfast-engine --bench-model /nonexistent)",
+      "Bash(MODEL=../models/tiny-q35 ./target/release/llmfast-engine --bench-model)"
     ]
   }
 }
