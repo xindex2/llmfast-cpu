@@ -97,7 +97,7 @@ fn handle(mut stream: TcpStream, engine: &Engine) {
     if request_line.starts_with("GET /health") {
         let (simd, i8) = crate::kernels::kernel_report();
         respond_json(&mut stream, 200, &json!({"status": "ok", "model": engine.model_name, "device": engine.model.device(), "progress": 1.0,
-            "simd_level": simd, "int8_decode": i8, "threads": crate::pool::global().threads(),
+            "build": crate::COMMIT, "simd_level": simd, "int8_decode": i8, "threads": crate::pool::global().threads(),
             "quant": std::env::var("QUANT").unwrap_or_else(|_| "bf16".into()), "weight_gb": engine.model.weight_bytes() as f64 / 1e9,
             "kv_int8": crate::model::kv_int8(), "mtp_k": crate::scheduler::mtp_k(),
             "context": engine.model.config().max_context}));

@@ -61,6 +61,7 @@ func (h *HTTPEngine) Device() string {
 // answering it meant running a benchmark beside the server and inferring. Now it is on the
 // dashboard next to the model it applies to.
 type Kernel struct {
+	Build      string  `json:"build"` // commit the engine binary was built from
 	SimdLevel  int     `json:"simd_level"`
 	Int8Decode bool    `json:"int8_decode"`
 	Threads    int     `json:"threads"`

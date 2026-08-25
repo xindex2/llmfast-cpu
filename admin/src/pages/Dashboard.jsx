@@ -123,6 +123,7 @@ export default function Dashboard() {
 function kernelLine(k) {
   const simd = ['scalar', 'AVX', 'AVX2+FMA'][k.simd_level] || `simd ${k.simd_level}`
   return [
+    k.build ? `build ${k.build}` : null,
     `${k.quant} · ${(k.weight_gb || 0).toFixed(1)} GB`,
     `${k.threads} threads`,
     simd,
@@ -130,7 +131,7 @@ function kernelLine(k) {
     k.kv_int8 ? 'int8 KV' : 'f32 KV',
     k.mtp_k ? `MTP k=${k.mtp_k}` : 'no speculation',
     `${(k.context / 1024).toFixed(0)}k ctx`,
-  ].join(' · ')
+  ].filter(Boolean).join(' · ')
 }
 
 function Card({ label, value, sub }) {

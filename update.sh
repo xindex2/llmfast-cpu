@@ -21,6 +21,18 @@ echo "== engine"
   && chmod +x llmfast-engine.new \
   && mv -f llmfast-engine.new llmfast-engine)
 
+# The binary is stamped with the commit it was built from. Refuse to continue if the deployed
+# one does not match the checkout: a silently stale engine looks identical from the outside and
+# sends you optimizing a fix that was never running.
+WANT=$(git rev-parse --short HEAD)
+GOT=$(./engine/llmfast-engine --version 2>/dev/null | awk '{print $2}')
+if [ "$GOT" != "$WANT" ]; then
+  echo "!! engine binary is $GOT but the checkout is $WANT" >&2
+  echo "!! the build did not land -- fix this before drawing conclusions from any benchmark" >&2
+  exit 1
+fi
+echo "   engine build $GOT"
+
 echo "== gateway"
 (cd gateway && go build -o llmfast-gateway .)
 
@@ -48,5 +60,6 @@ fi
 if [ "${1:-}" = "engines" ]; then
   pkill -f llmfast-engine || true
   echo "== engines stopped — press 'start engine' in the admin (models load from the weight cache)"
+  echo "   the new engine reports its build in models/<id>/engine.log: grep 'ready in'"
 fi
 echo "done"

@@ -20,8 +20,16 @@ mod tokenizer;
 
 use std::sync::Arc;
 
+/// Commit this binary was built from, stamped by build.rs. Reported by --version, the startup
+/// line and /health, so "is the running engine current" is never again a matter of inference.
+pub const COMMIT: &str = env!("LLMFAST_COMMIT");
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("llmfast-engine {COMMIT}");
+        return;
+    }
     // The kernel benchmarks synthesise their own matrices; requiring MODEL for them meant
     // pointing --bench at a checkpoint that it never opens.
     if args.iter().any(|a| a == "--bench") {
@@ -140,7 +148,7 @@ fn main() {
         // so far has ended at "was the fast path even on", answerable only by inference.
         let (simd, i8) = kernels::kernel_report();
         eprintln!(
-            "ready in {:.1}s (context {}, threads {}, simd {}, {} decode, {} KV)",
+            "ready in {:.1}s (build {COMMIT}, context {}, threads {}, simd {}, {} decode, {} KV)",
             t0.elapsed().as_secs_f32(),
             engine.model.config().max_context,
             pool::global().threads(),
