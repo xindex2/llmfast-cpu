@@ -47,7 +47,16 @@ deprioritizes providers below 95% uptime, and spot pods get killed.
 ## 2. Install
 
 ```bash
-# in the pod's terminal (root)
+# in the pod's terminal (root) — safe to re-run after every container reset
+curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/deploy/runpod-setup.sh | bash
+```
+
+The script installs Vulkan, writes the ICD manifest RunPod omits, pulls any driver userspace
+libraries the mount is missing (matched to the host's exact driver version, cached on
+/workspace), installs llmfast, points MODELS_DIR at /workspace/models, and starts the gateway.
+It prints the admin token at the end. Manual equivalent, if you prefer:
+
+```bash
 apt-get update && apt-get install -y libvulkan1 vulkan-tools   # Vulkan loader + vulkaninfo
 vulkaninfo --summary | grep -E "deviceName|driverName"          # must list your GPU
 curl -fsSL https://raw.githubusercontent.com/xindex2/llmfast-cpu/main/install.sh | bash
