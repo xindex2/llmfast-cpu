@@ -165,6 +165,19 @@ func (r *Registry) download(e ModelEntry) {
 		fail(fmt.Errorf("repo has no config.json/tokenizer.json — not a transformers checkpoint"))
 		return
 	}
+	// Check the architecture BEFORE the multi-gigabyte shards: config.json is a few KB, and
+	// learning "unsupported architecture" after a 60 GB download is how this check got written.
+	if cr, err := http.Get("https://huggingface.co/" + e.HFID + "/raw/main/config.json"); err == nil {
+		var cfg struct {
+			Architectures []string `json:"architectures"`
+		}
+		if json.NewDecoder(cr.Body).Decode(&cfg) == nil && len(cfg.Architectures) > 0 && !strings.HasPrefix(cfg.Architectures[0], "Qwen3") {
+			cr.Body.Close()
+			fail(fmt.Errorf("unsupported architecture %s — this engine runs the Qwen3 family (dense, MoE, hybrid); nothing was downloaded", cfg.Architectures[0]))
+			return
+		}
+		cr.Body.Close()
+	}
 	if err := os.MkdirAll(e.Dir, 0o755); err != nil {
 		fail(err)
 		return
