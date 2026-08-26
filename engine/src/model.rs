@@ -77,20 +77,32 @@ impl Weight {
         }
     }
 
-    fn from_cache(kind: &str, n: usize, k: usize, b: &[u8]) -> Weight {
+    /// `mapped` = (weight-cache mmap, absolute offset of `b` inside it). When present, the
+    /// quantized codes become a zero-copy window into the map — the OS page cache then decides
+    /// which weights live in RAM, which is what lets a model larger than RAM serve at all.
+    /// Scales (f32, and the hottest bytes of every matrix) are always copied out.
+    fn from_cache(kind: &str, n: usize, k: usize, b: &[u8], mapped: Option<(&std::sync::Arc<memmap2::Mmap>, usize)>) -> Weight {
         // copy_rows, not a plain memcpy: each pool worker copies the rows it will later
         // multiply, so first-touch puts those pages on its own NUMA node. A single-threaded
         // copy here parks every weight on node 0 and makes half a two-socket box read
         // remotely for the life of the process.
-        use crate::kernels::copy_rows as to_vec;
+        use crate::kernels::{copy_rows as to_vec, WBytes};
         match kind {
             "q8" => {
                 let (q, sc) = b.split_at(n * k);
-                Weight::Q8(QMat { n, k, q: to_vec(q, n), scales: to_vec(sc, n) })
+                let codes = match mapped {
+                    Some((m, off)) => WBytes::Mapped { map: m.clone(), off, len: n * k },
+                    None => to_vec::<i8>(q, n).into(),
+                };
+                Weight::Q8(QMat { n, k, q: codes, scales: to_vec(sc, n) })
             }
             "q4" => {
                 let (q, sc) = b.split_at(n * k / 2);
-                Weight::Q4(Q4Mat { n, k, q: to_vec(q, n), scales: to_vec(sc, n) })
+                let codes = match mapped {
+                    Some((m, off)) => WBytes::Mapped { map: m.clone(), off, len: n * k / 2 },
+                    None => to_vec::<u8>(q, n).into(),
+                };
+                Weight::Q4(Q4Mat { n, k, q: codes, scales: to_vec(sc, n) })
             }
             _ => Weight::Bf16 { w: to_vec(b, n), n, k },
         }
@@ -418,18 +430,57 @@ mod wcache {
         }
         let data_start = 8 + hlen as u64;
         let t0 = std::time::Instant::now();
+        // WMAP (default on): quantized codes stay a zero-copy window into the mmap'd cache
+        // file — loads are near-instant and the OS page cache is the LRU that lets a model
+        // larger than RAM serve. WMAP=0 copies everything into RAM (the pre-mmap behavior,
+        // with NUMA-aware placement — best on a dual-socket box whose model fits in RAM).
+        let use_map = std::env::var("WMAP").map_or(true, |v| v != "0");
+        let map = if use_map {
+            match unsafe { memmap2::Mmap::map(&f) } {
+                Ok(m) => Some(std::sync::Arc::new(m)),
+                Err(e) => {
+                    eprintln!("weight cache: mmap failed ({e}), copying into RAM");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut out = HashMap::new();
         let total = h["tensors"].as_object()?.len();
         for (i, (name, v)) in h["tensors"].as_object()?.iter().enumerate() {
             super::set_progress(i, total + 1);
             let (kind, n, k) = (v["kind"].as_str()?, v["n"].as_u64()? as usize, v["k"].as_u64()? as usize);
             let (off, len) = (v["off"].as_u64()?, v["len"].as_u64()? as usize);
-            let mut b = vec![0u8; len];
-            f.seek(SeekFrom::Start(data_start + off)).ok()?;
-            f.read_exact(&mut b).ok()?;
-            out.insert(name.clone(), Weight::from_cache(kind, n, k, &b));
+            let abs = data_start as usize + off as usize;
+            let w = match &map {
+                Some(m) => Weight::from_cache(kind, n, k, &m[abs..abs + len], Some((m, abs))),
+                None => {
+                    let mut b = vec![0u8; len];
+                    f.seek(SeekFrom::Start(data_start + off)).ok()?;
+                    f.read_exact(&mut b).ok()?;
+                    Weight::from_cache(kind, n, k, &b, None)
+                }
+            };
+            out.insert(name.clone(), w);
         }
-        eprintln!("weight cache: loaded {} tensors in {:.1}s", out.len(), t0.elapsed().as_secs_f32());
+        if let Some(m) = &map {
+            // Prewarm in the background: touch every page in order so readahead streams the
+            // file into the page cache at sequential-NVMe speed, instead of the first tokens
+            // paying random-access faults. On a box where the model exceeds RAM, early pages
+            // simply get evicted again — harmless.
+            let m2 = m.clone();
+            std::thread::spawn(move || {
+                let mut sink = 0u8;
+                for i in (0..m2.len()).step_by(4096) {
+                    sink ^= m2[i];
+                }
+                std::hint::black_box(sink);
+            });
+            eprintln!("weight cache: mapped {} tensors in {:.1}s (page cache is the weight LRU; WMAP=0 to copy into RAM)", out.len(), t0.elapsed().as_secs_f32());
+        } else {
+            eprintln!("weight cache: loaded {} tensors in {:.1}s", out.len(), t0.elapsed().as_secs_f32());
+        }
         Some(out)
     }
 

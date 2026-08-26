@@ -182,7 +182,7 @@ fn concat_q8(parts: &[&QMat]) -> QMat {
         scales.extend_from_slice(&p.scales);
         n += p.n;
     }
-    QMat { n, k, q, scales }
+    QMat { n, k, q: q.into(), scales }
 }
 
 impl GpuModel {

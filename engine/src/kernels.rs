@@ -872,10 +872,40 @@ use avx::{dot_bf16 as dot_bf16_avx2, dot_f32 as dot_f32_avx2, tile4x2 as tile4x2
 
 pub const QBLOCK: usize = 32;
 
+/// Weight bytes: owned RAM, or a window into an mmap'd weight cache. Derefs to a slice, so the
+/// kernels never care which. The mapped variant is what lets a model larger than RAM serve:
+/// the OS page cache keeps the hot experts' pages resident and evicts the cold ones — an LRU
+/// nobody had to write. Only byte-sized elements may be mapped (no alignment to negotiate);
+/// scales stay owned because they are f32 and the hottest fraction of every matrix anyway.
+pub enum WBytes<T: Copy> {
+    Owned(Vec<T>),
+    Mapped { map: std::sync::Arc<memmap2::Mmap>, off: usize, len: usize },
+}
+
+impl<T: Copy> std::ops::Deref for WBytes<T> {
+    type Target = [T];
+    #[inline]
+    fn deref(&self) -> &[T] {
+        match self {
+            WBytes::Owned(v) => v,
+            WBytes::Mapped { map, off, len } => {
+                debug_assert_eq!(std::mem::size_of::<T>(), 1, "only byte types may be mapped");
+                unsafe { std::slice::from_raw_parts(map.as_ptr().add(*off) as *const T, *len) }
+            }
+        }
+    }
+}
+
+impl<T: Copy> From<Vec<T>> for WBytes<T> {
+    fn from(v: Vec<T>) -> Self {
+        WBytes::Owned(v)
+    }
+}
+
 pub struct QMat {
     pub n: usize,
     pub k: usize,
-    pub q: Vec<i8>,        // n * k
+    pub q: WBytes<i8>,     // n * k
     pub scales: Vec<f32>,  // n * k / QBLOCK
 }
 
@@ -912,7 +942,7 @@ impl QMat {
                 }
             }
         });
-        QMat { n, k, q, scales }
+        QMat { n, k, q: q.into(), scales }
     }
 
     pub fn bytes(&self) -> usize {
@@ -1246,7 +1276,7 @@ pub fn attention(q: &[f32], kc: &[f32], vc: &[f32], stride: usize, pos: usize, h
 pub struct Q4Mat {
     pub n: usize,
     pub k: usize,
-    pub q: Vec<u8>,       // n * k / 2, two nibbles per byte; byte i of a block holds w[i] (lo) and w[i+16] (hi)
+    pub q: WBytes<u8>,    // n * k / 2, two nibbles per byte; byte i of a block holds w[i] (lo) and w[i+16] (hi)
     pub scales: Vec<f32>, // n * k / QBLOCK
 }
 
@@ -1290,7 +1320,7 @@ impl Q4Mat {
                 }
             }
         });
-        Q4Mat { n, k, q, scales }
+        Q4Mat { n, k, q: q.into(), scales }
     }
 
     pub fn bytes(&self) -> usize {
@@ -1824,7 +1854,7 @@ mod tests {
             .chain(q.scales.iter().flat_map(|s| s.to_le_bytes()))
             .collect();
         let (qb, sb) = bytes.split_at(n * k);
-        let q2 = super::QMat { n, k, q: super::copy_rows(qb, n), scales: super::copy_rows(sb, n) };
+        let q2 = super::QMat { n, k, q: super::copy_rows::<i8>(qb, n).into(), scales: super::copy_rows(sb, n) };
         let mut b = vec![0f32; n];
         super::matvec_q8(&q2, &x, &mut b);
         assert_eq!(a, b, "weight placement changed the result");
