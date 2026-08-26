@@ -266,6 +266,22 @@ func (r *Registry) Start(id string) error {
 		})
 		return fmt.Errorf("model files missing at %s — remove and re-download", e.Dir)
 	}
+	// Refuse foreign architectures with words, before the engine panics with "exit status 101".
+	// The engine speaks the Qwen3 family (dense, MoE, Next hybrids); anything else (gpt-oss,
+	// Llama, Mistral, ...) parses wrong at best and panics at first missing tensor at worst.
+	if raw, err := os.ReadFile(filepath.Join(e.Dir, "config.json")); err == nil {
+		var cfg struct {
+			Architectures []string `json:"architectures"`
+		}
+		if json.Unmarshal(raw, &cfg) == nil && len(cfg.Architectures) > 0 {
+			arch := cfg.Architectures[0]
+			if !strings.HasPrefix(arch, "Qwen3") {
+				msg := fmt.Sprintf("unsupported architecture %s — this engine runs the Qwen3 family (dense, MoE, hybrid)", arch)
+				r.update(id, func(m *ModelEntry) { m.Status, m.Error = "error", msg })
+				return fmt.Errorf("%s", msg)
+			}
+		}
+	}
 	r.mu.Lock()
 	if _, running := r.procs[id]; running {
 		r.mu.Unlock()
