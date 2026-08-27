@@ -176,11 +176,41 @@ pub fn matmul_bf16(w: &[u16], xs: &[f32], m: usize, n: usize, k: usize, ys: &mut
 
 /// Rows r0..r1 (already f32, contiguous in `rows`) against all m inputs, 4x2 register tiles.
 #[allow(clippy::too_many_arguments)]
+/// Columns (tokens) per GEMM block. The activation block a row group is multiplied against is
+/// jb*k*4 bytes; keeping it inside L2 is what stops prefill from re-streaming the whole m*k
+/// activation matrix out of L3 once per row group. GEMM_KB overrides the budget (0 = one block,
+/// the pre-blocking behavior). Blocks are >= 2 columns so the 4x2 tile still applies.
+fn col_block(k: usize) -> usize {
+    use std::sync::OnceLock;
+    static KB: OnceLock<usize> = OnceLock::new();
+    let kb = *KB.get_or_init(|| std::env::var("GEMM_KB").ok().and_then(|v| v.parse().ok()).unwrap_or(128));
+    if kb == 0 {
+        return usize::MAX;
+    }
+    ((kb << 10) / (k * 4)).max(2)
+}
+
 fn tile_rows(rows: &[f32], r0: usize, r1: usize, xs: &[f32], m: usize, n: usize, k: usize, yp: SendPtr) {
+    // Blocked over columns: each pass covers every row of this chunk against a slice of the
+    // activations small enough to stay resident, instead of walking all m columns per row
+    // group and pulling the whole activation matrix through L3 four times per chunk.
+    let jb = col_block(k).max(2);
+    let mut j0 = 0;
+    while j0 < m {
+        let j1 = (j0 + jb).min(m);
+        tile_rows_cols(rows, r0, r1, xs, j0, j1, m, n, k, yp);
+        j0 = j1;
+    }
+}
+
+/// One column block [j0, j1) of `tile_rows`.
+#[allow(clippy::too_many_arguments)]
+fn tile_rows_cols(rows: &[f32], r0: usize, r1: usize, xs: &[f32], j0: usize, j1: usize, _m: usize, n: usize, k: usize, yp: SendPtr) {
+        let m = j1; // columns run j0..j1 in this block
         let mut i = 0;
         while i + 4 <= r1 - r0 {
             let (ra, rb, rc, rd) = (&rows[i * k..(i + 1) * k], &rows[(i + 1) * k..(i + 2) * k], &rows[(i + 2) * k..(i + 3) * k], &rows[(i + 3) * k..(i + 4) * k]);
-            let mut j = 0;
+            let mut j = j0;
             while j + 2 <= m {
                 let (x0, x1) = (&xs[j * k..(j + 1) * k], &xs[(j + 1) * k..(j + 2) * k]);
                 let r = tile4x2(ra, rb, rc, rd, x0, x1);
@@ -205,7 +235,7 @@ fn tile_rows(rows: &[f32], r0: usize, r1: usize, xs: &[f32], m: usize, n: usize,
         }
         while i < r1 - r0 {
             let row = &rows[i * k..(i + 1) * k];
-            for j in 0..m {
+            for j in j0..m {
                 unsafe { *yp.get().add(j * n + r0 + i) = dot_f32(row, &xs[j * k..(j + 1) * k]) };
             }
             i += 1;

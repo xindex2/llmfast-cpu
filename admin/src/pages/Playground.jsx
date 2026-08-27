@@ -77,6 +77,9 @@ export default function Playground({ session = false }) {
 
       {stat && <p className="muted">
         TTFT {stat.ttft.toFixed(0)} ms · {stat.tps.toFixed(1)} tok/s · {stat.usage?.prompt_tokens} prompt / {stat.usage?.completion_tokens} completion tokens
+        {stat.usage?.prompt_tokens_details?.cached_tokens > 0 && <span title="Prompt tokens whose KV state was reused from an earlier request — these skip prefill entirely, which is what TTFT is made of.">
+          {' '}· {stat.usage.prompt_tokens_details.cached_tokens} of {stat.usage.prompt_tokens} prompt cached
+        </span>}
         {stat.server && <>
           {'\u2003'}
           <span title="Measured by the server. The difference from the number on the left is network latency between you and the box.">
