@@ -60,6 +60,17 @@ fn main() {
             eprintln!("no config.json in {dir} — is the model downloaded? (add it in the admin Models page first)");
             std::process::exit(2);
         }
+        // config.json lands first and the shards stream in after it, so a bench started right
+        // after "Add & download" finds a directory that looks real and panics deep in the
+        // safetensors loader. Say what is actually happening instead.
+        let shards = std::fs::read_dir(&dir).map(|d| {
+            d.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".safetensors")).count()
+        }).unwrap_or(0);
+        if shards == 0 {
+            eprintln!("no .safetensors in {dir} yet — the download is still running; watch it with:");
+            eprintln!("  curl -s -H \"Authorization: Bearer $T\" http://localhost:8080/admin/models | python3 -m json.tool | grep -E 'id|status|progress'");
+            std::process::exit(2);
+        }
         bench_model(&dir);
         return;
     }
