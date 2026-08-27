@@ -58,9 +58,29 @@ struct PrefixCache {
     budget: usize,
 }
 
+/// Default KV-cache budget: a share of the RAM actually free after the weights are resident.
+/// A flat 1 GB was the old default, which on a 126 GB server held roughly one conversation's
+/// worth of prefix for an 8B model -- and a prefix that has been evicted is a full prefill.
+/// Capped so a huge box does not hand the whole machine to cold entries.
+fn default_prefix_mb(fallback: usize) -> usize {
+    let avail_mb = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| {
+        t.lines()
+            .find(|l| l.starts_with("MemAvailable:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<usize>().ok())
+            .map(|kb| kb / 1024)
+    });
+    match avail_mb {
+        Some(avail) => (avail / 4).clamp(fallback, 32 << 10),
+        None => fallback,
+    }
+}
+
 impl PrefixCache {
     fn new(default_mb: usize) -> PrefixCache {
-        let mb: usize = std::env::var("PREFIX_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(default_mb);
+        let mb: usize = std::env::var("PREFIX_CACHE_MB").ok().and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| default_prefix_mb(default_mb));
+        eprintln!("prefix cache: {mb} MB of KV kept for prompt reuse (PREFIX_CACHE_MB)");
         PrefixCache { entries: Vec::new(), clock: 0, budget: mb << 20 }
     }
 
