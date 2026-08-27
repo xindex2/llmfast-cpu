@@ -75,7 +75,11 @@ function ModelCard({ m, busy, action, save, models }) {
         {m.status === 'ready' && <button className="primary" onClick={() => action(m.id, 'start')} disabled={!!busy}><Play /> Start engine</button>}
         {(m.status === 'running' || m.status === 'starting') && <button className="danger" onClick={() => action(m.id, 'stop')} disabled={!!busy}><Stop /> Stop</button>}
         {m.status === 'error' && <button className="primary" onClick={() => action(m.id, 'retry')} disabled={!!busy}><Refresh /> Retry download</button>}
-        <button className="ghost" onClick={() => { if (confirm(`Remove ${m.id}? (files are kept)`)) action(m.id, 'delete') }} disabled={!!busy}><Trash /> Remove</button>
+        <button className="ghost" onClick={() => {
+          if (!confirm(`Remove ${m.id} from the catalog?`)) return
+          const files = confirm(`Also delete its files on disk?\n\n${m.dir}\n\nOK = delete files (frees the space) · Cancel = keep them`)
+          action(m.id, 'delete', files ? '?files=1' : '')
+        }} disabled={!!busy}><Trash /> Remove</button>
       </div>
       <div className="row" style={{ marginBottom: 0 }}>
         <label>input $/M<input type="number" step="0.001" value={e.prompt_price_per_m} onChange={set('prompt_price_per_m')} style={{ width: 90 }} /></label>
