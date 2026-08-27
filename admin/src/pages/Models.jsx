@@ -76,9 +76,7 @@ function ModelCard({ m, busy, action, save, models }) {
         {(m.status === 'running' || m.status === 'starting') && <button className="danger" onClick={() => action(m.id, 'stop')} disabled={!!busy}><Stop /> Stop</button>}
         {m.status === 'error' && <button className="primary" onClick={() => action(m.id, 'retry')} disabled={!!busy}><Refresh /> Retry download</button>}
         <button className="ghost" onClick={() => {
-          if (!confirm(`Remove ${m.id} from the catalog?`)) return
-          const files = confirm(`Also delete its files on disk?\n\n${m.dir}\n\nOK = delete files (frees the space) · Cancel = keep them`)
-          action(m.id, 'delete', files ? '?files=1' : '')
+          if (confirm(`Remove ${m.id} and delete its files on disk?\n\n${m.dir}`)) action(m.id, 'delete')
         }} disabled={!!busy}><Trash /> Remove</button>
       </div>
       <div className="row" style={{ marginBottom: 0 }}>

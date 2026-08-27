@@ -538,7 +538,10 @@ func (s *Server) handleModelAction(w http.ResponseWriter, r *http.Request) {
 			go s.registry.download(e)
 		}
 	case "delete":
-		err = s.registry.Remove(id, r.URL.Query().Get("files") == "1")
+		// Removing a model cleans its files up too — leaving 60 GB checkpoints behind a
+		// catalog that no longer lists them is how the disk quietly filled. ?files=0 keeps
+		// them for the rare "re-add without re-downloading" case.
+		err = s.registry.Remove(id, r.URL.Query().Get("files") != "0")
 	default:
 		err = fmt.Errorf("unknown action")
 	}
