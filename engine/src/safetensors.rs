@@ -91,8 +91,20 @@ impl SafeTensors {
         bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
     }
 
+    /// Read a tensor as f32 whatever its stored precision. Checkpoints are inconsistent about
+    /// small vectors: Qwen3.5-27B stores linear_attn.A_log/dt_bias as BF16, Qwen3.5-9B stores
+    /// the same tensors as F32 -- asserting one dtype rejected a valid checkpoint.
     pub fn f32(&self, name: &str) -> Vec<f32> {
-        self.bf16(name).into_iter().map(crate::kernels::bf16_to_f32).collect()
+        let t = self.tensors.get(name).unwrap_or_else(|| panic!("tensor {name} not found"));
+        match t.dtype.as_str() {
+            "F32" => {
+                let (mmap, data_start) = &self.shards[t.shard];
+                let bytes = &mmap[data_start + t.start..data_start + t.end];
+                bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+            }
+            "BF16" => self.bf16(name).into_iter().map(crate::kernels::bf16_to_f32).collect(),
+            other => panic!("{name}: expected F32 or BF16, got {other}"),
+        }
     }
 
     #[allow(dead_code)] // used by the fixture generator and ad-hoc inspection
