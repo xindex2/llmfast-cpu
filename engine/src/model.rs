@@ -1119,9 +1119,121 @@ impl Model {
     /// Mixture of experts for m tokens: route each token to its top-k experts, then run each
     /// expert ONCE on all tokens routed to it (a batched matmul), and scatter the weighted
     /// outputs back. Only the chosen experts' weights are touched — that's the MoE speed win.
+    /// Rows r0..r1 of w·x, callable from inside one shared pool job. `xq` is the pre-quantized
+    /// activation when the int8 decode path is on (quantized once, reused by every expert).
+    fn dot_rows(w: &Weight, x: &[f32], xq: Option<&crate::kernels::Q8Vec>, r0: usize, r1: usize, out: &mut [f32]) {
+        use crate::kernels as kn;
+        match w {
+            Weight::Q8(q) => {
+                let blocks = q.k / kn::QBLOCK;
+                for i in r0..r1 {
+                    let (qs, sc) = (&q.q[i * q.k..(i + 1) * q.k], &q.scales[i * blocks..(i + 1) * blocks]);
+                    out[i - r0] = match xq {
+                        Some(v) => kn::dot_q8_i8(qs, sc, v),
+                        None => kn::dot_q8(qs, sc, x),
+                    };
+                }
+            }
+            Weight::Q4(q) => {
+                let blocks = q.k / kn::QBLOCK;
+                for i in r0..r1 {
+                    let (qs, sc) = (&q.q[i * q.k / 2..(i + 1) * q.k / 2], &q.scales[i * blocks..(i + 1) * blocks]);
+                    out[i - r0] = match xq {
+                        Some(v) => kn::dot_q4_i8(qs, sc, v),
+                        None => kn::dot_q4(qs, sc, x),
+                    };
+                }
+            }
+            Weight::Bf16 { .. } => unreachable!("fused MoE path is quantized-only"),
+        }
+    }
+
+    /// One-token MoE with two pool dispatches total (plus the router matvec): phase A computes
+    /// every selected expert's gate|up rows under one work queue, phase B their down rows. The
+    /// arithmetic is identical to the grouped path; only the dispatch count changes.
+    fn moe_forward_fused(&self, router: &[f32], experts: &[Expert], hn: &[f32], x: &mut [f32]) {
+        use crate::kernels as kn;
+        let c = &self.config;
+        let (ne, topk, mi) = (c.num_experts, c.experts_per_tok, c.moe_intermediate);
+        let h = &hn[..c.hidden];
+        // routing (identical to the grouped path)
+        let mut logits = vec![0f32; ne];
+        for e in 0..ne {
+            logits[e] = router[e * c.hidden..(e + 1) * c.hidden].iter().zip(h).map(|(a, b)| a * b).sum();
+        }
+        softmax(&mut logits);
+        let mut idx: Vec<usize> = (0..ne).collect();
+        idx.select_nth_unstable_by(topk - 1, |&a, &b| logits[b].total_cmp(&logits[a]));
+        let top = &idx[..topk];
+        let norm: f32 = if c.norm_topk_prob { top.iter().map(|&e| logits[e]).sum() } else { 1.0 };
+        let sel: Vec<(usize, f32)> = top.iter().map(|&e| (e, logits[e] / norm)).collect();
+
+        let xq = if kn::i8_decode() && c.hidden % kn::QBLOCK == 0 { Some(kn::quantize_vec(h)) } else { None };
+        let rpc = kn::ROWS_PER_CHUNK;
+        let per = (mi + rpc - 1) / rpc; // chunks per (expert, gate-or-up) part
+
+        // phase A: gate and up rows of every selected expert, one dispatch
+        let mut gu = vec![0f32; sel.len() * 2 * mi];
+        {
+            let gup = crate::kernels::SendPtrPub(gu.as_mut_ptr());
+            let chunks = sel.len() * 2 * per;
+            crate::pool::global().run(chunks, &|ch| {
+                let (s, rest) = (ch / (2 * per), ch % (2 * per));
+                let (part, pc) = (rest / per, rest % per);
+                let e = &experts[sel[s].0];
+                let w = if part == 0 { &e.w_gate } else { &e.w_up };
+                let r0 = pc * rpc;
+                let r1 = (r0 + rpc).min(mi);
+                let base = s * 2 * mi + part * mi + r0;
+                let out = unsafe { std::slice::from_raw_parts_mut(gup.get().add(base), r1 - r0) };
+                Self::dot_rows(w, h, xq.as_ref(), r0, r1, out);
+            });
+        }
+        // silu·up per slot (tiny: topk*mi elements, not worth a dispatch)
+        let mut act = vec![0f32; sel.len() * mi];
+        for s in 0..sel.len() {
+            for i in 0..mi {
+                let g = gu[s * 2 * mi + i];
+                act[s * mi + i] = silu(g) * gu[s * 2 * mi + mi + i];
+            }
+        }
+        // phase B: every selected expert's down rows, one dispatch
+        let actq: Vec<Option<kn::Q8Vec>> = (0..sel.len())
+            .map(|s| if kn::i8_decode() && mi % kn::QBLOCK == 0 { Some(kn::quantize_vec(&act[s * mi..(s + 1) * mi])) } else { None })
+            .collect();
+        let mut down = vec![0f32; sel.len() * c.hidden];
+        {
+            let dp = crate::kernels::SendPtrPub(down.as_mut_ptr());
+            let perd = (c.hidden + rpc - 1) / rpc;
+            let chunks = sel.len() * perd;
+            crate::pool::global().run(chunks, &|ch| {
+                let (s, pc) = (ch / perd, ch % perd);
+                let e = &experts[sel[s].0];
+                let r0 = pc * rpc;
+                let r1 = (r0 + rpc).min(c.hidden);
+                let out = unsafe { std::slice::from_raw_parts_mut(dp.get().add(s * c.hidden + r0), r1 - r0) };
+                Self::dot_rows(&e.w_down, &act[s * mi..(s + 1) * mi], actq[s].as_ref(), r0, r1, out);
+            });
+        }
+        // weighted accumulate (topk*hidden fmas: trivial)
+        for (s, &(_, w)) in sel.iter().enumerate() {
+            for d in 0..c.hidden {
+                x[d] += w * down[s * c.hidden + d];
+            }
+        }
+    }
+
     fn moe_forward(&self, router: &[f32], experts: &[Expert], hn: &[f32], m: usize, x: &mut [f32]) {
         let c = &self.config;
         let (ne, k) = (c.num_experts, c.experts_per_tok);
+        // Decode fast path: one token, quantized experts. The grouped path below issues ~3 pool
+        // dispatches per selected expert -- ~25 barriers per layer, ~1200 per token across 48
+        // MoE layers, on matvecs too small to fill the pool. Measured cost on a 20-core box:
+        // 4.2 tok/s where the streaming arithmetic says ~20. This path fuses all selected
+        // experts' gate+up into ONE dispatch and all downs into a second.
+        if m == 1 && experts.iter().all(|e| matches!((&e.w_gate, &e.w_up, &e.w_down), (Weight::Q8(_) | Weight::Q4(_), Weight::Q8(_) | Weight::Q4(_), Weight::Q8(_) | Weight::Q4(_)))) {
+            return self.moe_forward_fused(router, experts, hn, x);
+        }
         // routing
         let mut logits = vec![0f32; ne];
         let mut assign: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ne]; // expert -> [(token, weight)]
@@ -1574,6 +1686,28 @@ mod tests {
             }
         }
         conv(&mut m.lm_head);
+    }
+
+    // The fused single-token MoE path (two pool dispatches) against the grouped path (one
+    // dispatch per expert matmul): same routing, same kernels, must agree to rounding. The
+    // bf16 sibling test never exercises fusion -- the fast path requires quantized experts.
+    #[test]
+    fn moe_fused_decode_matches_grouped() {
+        let mut m = tiny_moe();
+        to_q8(&mut m);
+        let toks = [3u32, 17, 42, 7, 99, 5];
+        // batched prefill uses the grouped path (m > 1); per-token decode uses the fused one
+        let mut c1 = KvCache::new(&m.config);
+        let mut last = Vec::new();
+        for &t in &toks {
+            last = m.forward(t, &mut c1);
+        }
+        let mut c2 = KvCache::new(&m.config);
+        let batched = m.forward_batch(&toks, &mut c2);
+        let peak = batched.iter().fold(0f32, |a, v| a.max(v.abs())).max(1e-6);
+        for (a, b) in last.iter().zip(&batched) {
+            assert!((a - b).abs() / peak < 2e-3, "fused {a} vs grouped {b}");
+        }
     }
 
     // Same comparison for a dense model: the MoE work refactored the dense GPU layer path

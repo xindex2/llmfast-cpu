@@ -1012,7 +1012,7 @@ pub fn quantize_vec(x: &[f32]) -> Q8Vec {
 ///
 /// `--bench` times both paths side by side on any box; I8_DECODE=1|0 overrides either way.
 #[cfg(target_arch = "x86_64")]
-fn i8_decode() -> bool {
+pub(crate) fn i8_decode() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| match std::env::var("I8_DECODE").ok().as_deref() {
@@ -1023,7 +1023,7 @@ fn i8_decode() -> bool {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn i8_decode() -> bool {
+pub(crate) fn i8_decode() -> bool {
     false
 }
 
@@ -1075,7 +1075,7 @@ pub fn matvec_q8_i8(w: &QMat, xq: &Q8Vec, y: &mut [f32]) {
 }
 
 #[inline]
-fn dot_q8_i8(q: &[i8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+pub(crate) fn dot_q8_i8(q: &[i8], wsc: &[f32], xq: &Q8Vec) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         return unsafe { sse::dot_q8_i8(q, wsc, xq) };
@@ -1225,7 +1225,7 @@ pub fn matmul_q8(w: &QMat, xs: &[f32], m: usize, ys: &mut [f32]) {
 }
 
 #[inline]
-fn dot_q8(q: &[i8], scales: &[f32], x: &[f32]) -> f32 {
+pub(crate) fn dot_q8(q: &[i8], scales: &[f32], x: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
         return unsafe { avx::dot_q8(q, scales, x) };
@@ -1388,7 +1388,7 @@ pub fn matvec_q4_i8(w: &Q4Mat, xq: &Q8Vec, y: &mut [f32]) {
 }
 
 #[inline]
-fn dot_q4_i8(q: &[u8], wsc: &[f32], xq: &Q8Vec) -> f32 {
+pub(crate) fn dot_q4_i8(q: &[u8], wsc: &[f32], xq: &Q8Vec) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         return unsafe { sse::dot_q4_i8(q, wsc, xq) };
@@ -1431,7 +1431,7 @@ pub fn matmul_q4(w: &Q4Mat, xs: &[f32], m: usize, ys: &mut [f32]) {
 }
 
 #[inline]
-fn dot_q4(q: &[u8], scales: &[f32], x: &[f32]) -> f32 {
+pub(crate) fn dot_q4(q: &[u8], scales: &[f32], x: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
         return unsafe { avx::dot_q4(q, scales, x) };
